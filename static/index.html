@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CRM Assistant (demo)</title>
+  <style>
+    body { font-family: Arial, sans-serif; font-size: 20px; margin: 0 auto; max-width: 800px; padding: 16px; background: #fff; color: #222; }
+    h1 { font-size: 28px; }
+    #log { border: 1px solid #ccc; border-radius: 6px; padding: 12px; min-height: 300px; margin-bottom: 12px; }
+    .msg { margin: 10px 0; padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+    .user { background: #e8f0fe; }
+    .bot { background: #f3f3f3; }
+    .meta { font-size: 16px; color: #555; margin-top: 6px; }
+    .demo { color: #a33; font-weight: bold; }
+    form { display: flex; gap: 8px; }
+    input { flex: 1; font-size: 20px; padding: 10px; }
+    button { font-size: 20px; padding: 10px 20px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>CRM Assistant</h1>
+  <p class="demo">Demo skeleton - no AI or live CRM connection</p>
+  <div id="log"></div>
+  <form id="form">
+    <input id="message" autocomplete="off" placeholder="Type a message..." aria-label="Message">
+    <button type="submit">Send</button>
+  </form>
+
+  <script>
+    const log = document.getElementById("log");
+    const input = document.getElementById("message");
+
+    function addMessage(text, cls, meta) {
+      const div = document.createElement("div");
+      div.className = "msg " + cls;
+      div.textContent = text;
+      if (meta) {
+        const m = document.createElement("div");
+        m.className = "meta";
+        m.innerHTML = "Route: <b></b> (" + "<span></span>) &middot; <span class='demo'>Demo skeleton - no AI or live CRM connection</span>";
+        m.querySelector("b").textContent = meta.route;
+        m.querySelector("span").textContent = meta.route_source;
+        div.appendChild(m);
+      }
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    document.getElementById("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      addMessage(message, "user");
+      input.value = "";
+      try {
+        const res = await fetch("/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message }),
+        });
+        const data = await res.json();
+        addMessage(data.reply, "bot", data);
+      } catch (err) {
+        addMessage("Error: " + err, "bot");
+      }
+    });
+  </script>
+</body>
+</html>
