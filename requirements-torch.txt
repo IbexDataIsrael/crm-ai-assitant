@@ -1,0 +1,4 @@
+# CPU-only PyTorch from the official CPU wheel index (no CUDA/GPU packages).
+# Installed before requirements.txt so sentence-transformers reuses it.
+--index-url https://download.pytorch.org/whl/cpu
+torch==2.14.1+cpu

@@ -20,7 +20,7 @@
 </head>
 <body>
   <h1>CRM Assistant</h1>
-  <p class="demo">Demo skeleton - no AI or live CRM connection</p>
+  <p class="demo">Demo - keyword-stub routing, local semantic retrieval, no AI-written answers, no live CRM connection</p>
   <div id="log"></div>
   <form id="form">
     <input id="message" autocomplete="off" placeholder="Type a message..." aria-label="Message">
@@ -38,7 +38,7 @@
       if (meta) {
         const m = document.createElement("div");
         m.className = "meta";
-        m.innerHTML = "Route: <b></b> (" + "<span></span>) &middot; <span class='demo'>Demo skeleton - no AI or live CRM connection</span>";
+        m.innerHTML = "Route: <b></b> (" + "<span></span>) &middot; <span class='demo'>Demo - no AI-written answers, no live CRM</span>";
         m.querySelector("b").textContent = meta.route;
         m.querySelector("span").textContent = meta.route_source;
         div.appendChild(m);

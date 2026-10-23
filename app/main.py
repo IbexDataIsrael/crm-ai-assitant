@@ -1,6 +1,7 @@
 """FastAPI app: serves the chat page and the /chat endpoint."""
 
 import json
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -11,7 +12,15 @@ from app import crm, knowledge, planner
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
-app = FastAPI(title="CRM Assistant (demo skeleton)")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load the embedding model and index knowledge/ once, before serving requests.
+    knowledge.get_store()
+    yield
+
+
+app = FastAPI(title="CRM Assistant (demo skeleton)", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):
@@ -27,6 +36,7 @@ def index():
 def chat(request: ChatRequest):
     plan = planner.plan(request.message)
     route = plan["route"]
+    passages = []
 
     if route == "action":
         function_name, result = crm.pick_placeholder(request.message)
@@ -35,11 +45,17 @@ def chat(request: ChatRequest):
             f"Demo result:\n{json.dumps(result, indent=2)}"
         )
     elif route == "knowledge":
-        reply = knowledge.get_instructions(request.message)
+        passages = knowledge.search(request.message)
+        reply = knowledge.format_reply(request.message, passages)
     else:
         reply = (
             "What would you like to do? You can ask me to find, add or update "
             "a contact, or ask how to do something."
         )
 
-    return {"reply": reply, "route": route, "route_source": plan["route_source"]}
+    return {
+        "reply": reply,
+        "route": route,
+        "route_source": plan["route_source"],
+        "passages": passages,
+    }
