@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app import crm, knowledge, planner
+from app import crm, generation, knowledge, planner
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -37,6 +37,7 @@ def chat(request: ChatRequest):
     plan = planner.plan(request.message)
     route = plan["route"]
     passages = []
+    generation_info = None
 
     if route == "action":
         function_name, result = crm.pick_placeholder(request.message)
@@ -46,7 +47,9 @@ def chat(request: ChatRequest):
         )
     elif route == "knowledge":
         passages = knowledge.search(request.message)
-        reply = knowledge.format_reply(request.message, passages)
+        generated = generation.generate_answer(request.message, passages)
+        generation_info = generated.as_dict()
+        reply = knowledge.format_reply(request.message, passages, generated)
     else:
         reply = (
             "What would you like to do? You can ask me to find, add or update "
@@ -58,4 +61,5 @@ def chat(request: ChatRequest):
         "route": route,
         "route_source": plan["route_source"],
         "passages": passages,
+        "generation": generation_info,
     }

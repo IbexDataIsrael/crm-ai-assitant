@@ -5,3 +5,8 @@ services:
       - .:/code
     ports:
       - "127.0.0.1:8011:8000"
+    # GEMINI_API_KEY (and optional GEMINI_MODEL) come from the git- and
+    # docker-ignored .env at container start - never baked into the image.
+    env_file:
+      - path: .env
+        required: false
