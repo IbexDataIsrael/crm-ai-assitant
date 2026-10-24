@@ -2,9 +2,11 @@
 
 import pytest
 
+from app import knowledge
 from app.chunking import Chunk, chunk_document, chunk_folder
 from app.embeddings import get_embedder
-from app.knowledge import KNOWLEDGE_DIR
+from app.knowledge import ACTIVE_DOCUMENTS, KNOWLEDGE_DIR
+from tests.conftest import FIXTURES_DIR, SAMPLE_DOCUMENTS
 
 
 def word_count(text: str) -> int:
@@ -18,18 +20,48 @@ def test_limit_is_read_from_the_model():
     assert embedder.count_tokens("") == 2
 
 
-def test_every_knowledge_file_is_marked_sample_data():
-    for path in KNOWLEDGE_DIR.glob("*.md"):
-        assert "SAMPLE DATA - fictional" in path.read_text(encoding="utf-8"), path.name
+def test_only_the_two_user_guides_are_indexed():
+    """The app searches exactly the reviewed English and Hebrew guides - nothing else in knowledge/."""
+    assert ACTIVE_DOCUMENTS == ("about_english.md", "about_hebrew.md")
+    indexed = {c.filename for c in knowledge.get_store().chunks}
+    assert indexed == set(ACTIVE_DOCUMENTS)
 
 
-def test_knowledge_chunks_keep_filename_heading_and_fit_the_model():
+def test_unlisted_files_are_skipped(tmp_path, caplog):
+    (tmp_path / "a_guide.md").write_text("# Guide\nline one", encoding="utf-8")
+    (tmp_path / "b_other.md").write_text("# Other\nunrelated content", encoding="utf-8")
+    (tmp_path / "c_notes.txt").write_text("not markdown", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        chunks = chunk_folder(tmp_path, word_count, 50, filenames=("a_guide.md",))
+    assert {c.filename for c in chunks} == {"a_guide.md"}
+    assert "Not indexed: b_other.md" in caplog.text
+    assert "Not indexed: c_notes.txt" in caplog.text
+    # Without a list every .md file would be read.
+    assert {c.filename for c in chunk_folder(tmp_path, word_count, 50)} == {"a_guide.md", "b_other.md"}
+
+
+def test_missing_listed_document_raises(tmp_path):
+    (tmp_path / "a_guide.md").write_text("# Guide\nline one", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match="b_guide.md"):
+        chunk_folder(tmp_path, word_count, 50, filenames=("a_guide.md", "b_guide.md"))
+
+
+def test_sample_fixture_chunks_keep_filename_heading_and_fit_the_model():
     embedder = get_embedder()
-    chunks = chunk_folder(KNOWLEDGE_DIR, embedder.count_tokens, embedder.max_tokens)
-    assert {c.filename for c in chunks} == {"sample.md", "visits.md", "donations.md"}
+    chunks = chunk_folder(FIXTURES_DIR, embedder.count_tokens, embedder.max_tokens, filenames=SAMPLE_DOCUMENTS)
+    assert {c.filename for c in chunks} == set(SAMPLE_DOCUMENTS)
+    assert len(chunks) == 11
     assert Chunk("visits.md", "Cancelling a visit", "") in [
         Chunk(c.filename, c.heading, "") for c in chunks
     ]
+    for chunk in chunks:
+        assert embedder.count_tokens(chunk.embed_text) <= embedder.max_tokens
+
+
+def test_user_guide_chunks_fit_the_model():
+    embedder = get_embedder()
+    chunks = chunk_folder(KNOWLEDGE_DIR, embedder.count_tokens, embedder.max_tokens, filenames=ACTIVE_DOCUMENTS)
+    assert {c.filename for c in chunks} == set(ACTIVE_DOCUMENTS)
     for chunk in chunks:
         assert embedder.count_tokens(chunk.embed_text) <= embedder.max_tokens
 

@@ -1,6 +1,7 @@
 """/chat endpoint tests: action and clarify placeholders, knowledge retrieval + generation.
 
-Gemini is always mocked here (see conftest.py); no live API calls.
+Gemini is always mocked here (see conftest.py); no live API calls. Knowledge tests search
+the fictional sample documents in tests/fixtures (the sample_knowledge fixture).
 """
 
 import pytest
@@ -54,7 +55,7 @@ def test_clarify_route(client):
         ("How do I pull out of tomorrow's appointment?", "visits.md", "Cancelling a visit"),
     ],
 )
-def test_knowledge_without_key_shows_passages_only(client, message, filename, heading):
+def test_knowledge_without_key_shows_passages_only(client, sample_knowledge, message, filename, heading):
     data = ask(client, message)
     assert data["route"] == "knowledge"
     assert data["route_source"] == "keyword-stub"
@@ -67,7 +68,7 @@ def test_knowledge_without_key_shows_passages_only(client, message, filename, he
     assert f"{filename} > {heading}" in data["reply"]
 
 
-def test_knowledge_with_mocked_answer(client, fake_gemini):
+def test_knowledge_with_mocked_answer(client, sample_knowledge, fake_gemini):
     fake_gemini.reply = FakeInteraction("Count it with a second volunteer and lock it in the office box [1].")
     data = ask(client, "How do I deal with money a supporter gives me?")
     assert data["generation"]["status"] == "answered"
@@ -81,14 +82,14 @@ def test_knowledge_with_mocked_answer(client, fake_gemini):
     assert sent.count("<passage ") == 3
 
 
-def test_knowledge_with_mocked_insufficient_sources(client, fake_gemini):
+def test_knowledge_with_mocked_insufficient_sources(client, sample_knowledge, fake_gemini):
     fake_gemini.reply = FakeInteraction("INSUFFICIENT_SOURCES")
     data = ask(client, "How do I reset the office alarm?")
     assert data["generation"]["status"] == "insufficient_sources"
     assert data["reply"].startswith("No answer: Gemini (gemini-3.8-flash) found that the passages below don't answer this question.")
 
 
-def test_knowledge_with_mocked_api_failure_shows_no_answer(client, fake_gemini):
+def test_knowledge_with_mocked_api_failure_shows_no_answer(client, sample_knowledge, fake_gemini):
     fake_gemini.error = errors.ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE", "message": "overloaded"}})
     data = ask(client, "How do I deal with money a supporter gives me?")
     assert data["generation"]["status"] == "error"

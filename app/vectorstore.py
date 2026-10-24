@@ -41,9 +41,9 @@ class VectorStore:
         self.chunks: list[Chunk] = []
         self.vectors: list[np.ndarray] = []
 
-    def build(self, folder: Path) -> None:
-        """Chunk and embed every document in the folder (replaces anything stored)."""
-        self.chunks = chunk_folder(folder, self.embedder.count_tokens, self.embedder.max_tokens)
+    def build(self, folder: Path, filenames: tuple[str, ...] | None = None) -> None:
+        """Chunk and embed the folder's documents (replaces anything stored)."""
+        self.chunks = chunk_folder(folder, self.embedder.count_tokens, self.embedder.max_tokens, filenames)
         self.vectors = list(self.embedder.encode([c.embed_text for c in self.chunks]))
 
     def search(self, question: str, k: int = 3) -> list[SearchResult]:

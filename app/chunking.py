@@ -6,9 +6,12 @@ a chunk is never longer than the model can read. If something cannot be made
 to fit, we raise an error instead of letting the model silently cut it off.
 """
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+
+log = logging.getLogger("uvicorn.error")
 
 # How many lines a new chunk repeats from the end of the previous chunk in the
 # same section, and how many words when one long line has to be split.
@@ -104,9 +107,31 @@ def chunk_document(
     return chunks
 
 
-def chunk_folder(folder: Path, count_tokens: Callable[[str], int], max_tokens: int) -> list[Chunk]:
-    """Chunk every .md file in a folder, in filename order."""
+def chunk_folder(
+    folder: Path,
+    count_tokens: Callable[[str], int],
+    max_tokens: int,
+    filenames: tuple[str, ...] | None = None,
+) -> list[Chunk]:
+    """Chunk documents in a folder, in filename order.
+
+    Without filenames, every .md file is read. With filenames, exactly those
+    files are read: a listed file that is missing raises an error, and any
+    other file in the folder is skipped (and the skip is logged), so a
+    document dropped into the folder by mistake never becomes searchable.
+    """
+    if filenames is None:
+        paths = sorted(folder.glob("*.md"))
+    else:
+        missing = [name for name in filenames if not (folder / name).is_file()]
+        if missing:
+            raise FileNotFoundError(f"Listed knowledge document(s) not found in {folder}: {', '.join(missing)}")
+        for path in sorted(folder.iterdir()):
+            if path.is_file() and path.name not in filenames:
+                log.warning("Not indexed: %s is not in the active document list", path.name)
+        paths = [folder / name for name in sorted(filenames)]
     chunks = []
-    for path in sorted(folder.glob("*.md")):
-        chunks.extend(chunk_document(path.name, path.read_text(encoding="utf-8"), count_tokens, max_tokens))
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        chunks.extend(chunk_document(path.name, text, count_tokens, max_tokens))
     return chunks

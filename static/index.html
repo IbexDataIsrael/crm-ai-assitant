@@ -8,19 +8,31 @@
     body { font-family: Arial, sans-serif; font-size: 20px; margin: 0 auto; max-width: 800px; padding: 16px; background: #fff; color: #222; }
     h1 { font-size: 28px; }
     #log { border: 1px solid #ccc; border-radius: 6px; padding: 12px; min-height: 300px; margin-bottom: 12px; }
-    .msg { margin: 10px 0; padding: 10px; border-radius: 6px; white-space: pre-wrap; }
+    .msg { margin: 10px 0; padding: 10px; border-radius: 6px; }
+    .text { white-space: pre-wrap; }
     .user { background: #e8f0fe; }
     .bot { background: #f3f3f3; }
-    .meta { font-size: 16px; color: #555; margin-top: 6px; }
+    .meta { font-size: 16px; color: #555; margin-top: 8px; }
     .demo { color: #a33; font-weight: bold; }
+    .section { border-radius: 6px; padding: 10px; margin: 8px 0; border-left: 6px solid; }
+    .section-title { font-size: 16px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 6px; }
+    .answer { background: #eaf6ec; border-color: #2e7d32; }
+    .notice { background: #fff8e1; border-color: #b7791f; }
+    .error { background: #fdecea; border-color: #c62828; }
+    .sources { background: #fff; border-color: #607d8b; }
+    .source { border-top: 1px solid #ddd; padding: 8px 0; }
+    .source:first-of-type { border-top: none; }
+    .source-head { font-size: 16px; color: #333; }
+    .cited { font-size: 14px; font-weight: bold; color: #fff; background: #2e7d32; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+    .small { font-size: 16px; color: #555; }
     form { display: flex; gap: 8px; }
-    input { flex: 1; font-size: 20px; padding: 10px; }
+    input { flex: 1; font-size: 20px; padding: 10px; min-width: 0; }
     button { font-size: 20px; padding: 10px 20px; cursor: pointer; }
   </style>
 </head>
 <body>
   <h1>CRM Assistant</h1>
-  <p class="demo">Demo - keyword-stub routing; knowledge answers from Gemini over fictional sample documents when a key is set; CRM actions are demo data, no live CRM connection</p>
+  <p class="demo">Demo - routing is a keyword stub (not AI). Knowledge questions search the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. CRM actions return demo data - no live CRM connection.</p>
   <div id="log"></div>
   <form id="form">
     <input id="message" autocomplete="off" placeholder="Type a message..." aria-label="Message">
@@ -31,23 +43,91 @@
     const log = document.getElementById("log");
     const input = document.getElementById("message");
 
-    function addMessage(text, cls, meta) {
-      const div = document.createElement("div");
-      div.className = "msg " + cls;
-      div.textContent = text;
-      if (meta) {
-        const m = document.createElement("div");
-        m.className = "meta";
-        m.innerHTML = "Route: <b></b> (" + "<span></span>) &middot; <span class='demo'>Demo CRM data - no live CRM</span>";
-        if (meta.generation) {
-          const g = document.createElement("span");
-          g.textContent = " · Answer: " + meta.generation.status + (meta.generation.status === "answered" ? " (AI-generated, " + meta.generation.model + ")" : "");
-          m.appendChild(g);
-        }
-        m.querySelector("b").textContent = meta.route;
-        m.querySelector("span").textContent = meta.route_source;
-        div.appendChild(m);
+    // Small helper: an element with a class and plain text (never HTML from the server).
+    function el(tag, cls, text) {
+      const node = document.createElement(tag);
+      if (cls) node.className = cls;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+
+    function section(cls, title) {
+      const box = el("section", "section " + cls);
+      box.appendChild(el("h2", "section-title", title));
+      return box;
+    }
+
+    // Part 1 of a knowledge reply: the AI answer, or why there is none.
+    function answerSection(g) {
+      if (g.status === "answered") {
+        const box = section("answer", "AI-generated answer (" + g.provider + ", " + g.model + ")");
+        box.appendChild(el("div", "text", g.answer));
+        const cited = g.citations.map(c => "[" + c.number + "] " + c.filename + " > " + c.heading).join("; ");
+        box.appendChild(el("div", "small", "Based only on the source passages below. Cited: " + cited));
+        return box;
       }
+      if (g.status === "insufficient_sources") {
+        const box = section("notice", "No answer - the sources don't cover this");
+        box.appendChild(el("div", "text", g.provider + " (" + g.model + ") found that the passages below don't answer this question."));
+        return box;
+      }
+      if (g.status === "no_api_key") {
+        const box = section("notice", "No AI-written answer - generation is off");
+        box.appendChild(el("div", "text", g.error + ". Showing the retrieved passages only."));
+        return box;
+      }
+      const box = section("error", "Error - answer generation failed");
+      box.appendChild(el("div", "text", g.error));
+      box.appendChild(el("div", "small", "No answer was generated. The passages below are retrieval results only."));
+      return box;
+    }
+
+    // Part 2: the retrieved passages, marked when the answer cited them.
+    function sourcesSection(passages, g) {
+      const citedNumbers = new Set((g && g.status === "answered") ? g.citations.map(c => c.number) : []);
+      const box = section("sources", "Source passages - local semantic retrieval (CRM user guides)");
+      passages.forEach((p, i) => {
+        const item = el("div", "source");
+        const head = el("div", "source-head", "[" + (i + 1) + "] " + p.filename + " > " + p.heading + " (similarity " + p.score.toFixed(2) + ")");
+        if (citedNumbers.has(i + 1)) head.appendChild(el("span", "cited", "cited"));
+        item.appendChild(head);
+        item.appendChild(el("div", "text", p.text));
+        box.appendChild(item);
+      });
+      return box;
+    }
+
+    function metaLine(data) {
+      const m = el("div", "meta", "Route: " + data.route + " (" + data.route_source + ") · ");
+      m.appendChild(el("span", "demo", data.route === "action" ? "Demo CRM data - no live CRM" : "Demo - no live CRM"));
+      return m;
+    }
+
+    function addUser(text) {
+      const div = el("div", "msg user");
+      div.appendChild(el("div", "text", text));
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    function addBot(data) {
+      const div = el("div", "msg bot");
+      if (data.route === "knowledge" && data.generation) {
+        div.appendChild(answerSection(data.generation));
+        div.appendChild(sourcesSection(data.passages, data.generation));
+      } else {
+        div.appendChild(el("div", "text", data.reply));  // action / clarify: unchanged demo text
+      }
+      div.appendChild(metaLine(data));
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    function addRequestError(message) {
+      const div = el("div", "msg bot");
+      const box = section("error", "Error - request failed");
+      box.appendChild(el("div", "text", message));
+      div.appendChild(box);
       log.appendChild(div);
       div.scrollIntoView();
     }
@@ -56,7 +136,7 @@
       e.preventDefault();
       const message = input.value.trim();
       if (!message) return;
-      addMessage(message, "user");
+      addUser(message);
       input.value = "";
       try {
         const res = await fetch("/chat", {
@@ -64,10 +144,13 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message }),
         });
-        const data = await res.json();
-        addMessage(data.reply, "bot", data);
+        if (!res.ok) {
+          addRequestError("The server returned HTTP " + res.status + ".");
+          return;
+        }
+        addBot(await res.json());
       } catch (err) {
-        addMessage("Error: " + err, "bot");
+        addRequestError("Could not reach the server (" + err + ").");
       }
     });
   </script>

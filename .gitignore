@@ -2,3 +2,6 @@
 .env
 __pycache__/
 .pytest_cache/
+
+# Claude Code conversation exports (/export)
+/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt

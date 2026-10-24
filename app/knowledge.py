@@ -1,7 +1,7 @@
 """Knowledge route: local semantic retrieval over knowledge/, plus the reply text.
 
 Retrieval returns the three most relevant passages with scores, filenames and
-headings. If Gemini generation succeeded, its cited answer is shown above the
+headings. If answer generation (Gemini or Claude) succeeded, its cited answer is shown above the
 passages; otherwise the reply says why there is no answer and shows the
 passages only.
 """
@@ -15,6 +15,10 @@ from app.vectorstore import VectorStore
 
 KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent / "knowledge"
 RETRIEVAL_LABEL = "Local semantic retrieval - source passages"
+# The reviewed user guides (English and Hebrew) are the only searchable
+# documents. Startup fails if one is missing; any other file in knowledge/ is
+# skipped and logged.
+ACTIVE_DOCUMENTS = ("about_english.md", "about_hebrew.md")
 TOP_K = 3
 
 
@@ -22,7 +26,7 @@ TOP_K = 3
 def get_store() -> VectorStore:
     """Build the in-memory store once per process (called at app startup)."""
     store = VectorStore(get_embedder())
-    store.build(KNOWLEDGE_DIR)
+    store.build(KNOWLEDGE_DIR, filenames=ACTIVE_DOCUMENTS)
     return store
 
 
@@ -43,14 +47,14 @@ def answer_header(generation: GenerationResult) -> list[str]:
     if generation.status == "answered":
         cited = "; ".join(f"[{c['number']}] {c['filename']} > {c['heading']}" for c in generation.citations)
         return [
-            f"AI-generated answer (Gemini, {generation.model}) - based only on the passages below:",
+            f"AI-generated answer ({generation.provider}, {generation.model}) - based only on the passages below:",
             generation.answer,
             f"Cited: {cited}",
         ]
     if generation.status == "insufficient_sources":
-        return [f"No answer: Gemini ({generation.model}) found that the passages below don't answer this question."]
+        return [f"No answer: {generation.provider} ({generation.model}) found that the passages below don't answer this question."]
     if generation.status == "no_api_key":
-        return ["No AI-written answer: answer generation is off because GEMINI_API_KEY is not set."]
+        return [f"No AI-written answer: answer generation is off because {generation.error}."]
     return [f"No AI-written answer: answer generation failed ({generation.error})."]
 
 

@@ -1,4 +1,4 @@
-"""Retrieval tests with the real model.
+"""Retrieval tests with the real model, over the fictional sample documents in tests/fixtures.
 
 Each question is a paraphrase that avoids the main words of the source text,
 so a pass means the match came from meaning, not shared keywords.
@@ -28,7 +28,7 @@ PARAPHRASES = [
 
 
 @pytest.mark.parametrize("question, filename, heading", PARAPHRASES)
-def test_paraphrase_finds_expected_source_first(question, filename, heading):
+def test_paraphrase_finds_expected_source_first(sample_knowledge, question, filename, heading):
     results = knowledge.search(question)
     ranking = [(r["filename"], r["heading"], r["score"]) for r in results]
     print(question, ranking)
@@ -36,6 +36,6 @@ def test_paraphrase_finds_expected_source_first(question, filename, heading):
     assert (results[0]["filename"], results[0]["heading"]) == (filename, heading), ranking
 
 
-def test_scores_are_sorted_best_first():
+def test_scores_are_sorted_best_first(sample_knowledge):
     scores = [r["score"] for r in knowledge.search("Where do donated clothes go?")]
     assert scores == sorted(scores, reverse=True)
