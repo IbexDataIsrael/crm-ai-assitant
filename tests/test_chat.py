@@ -1,4 +1,4 @@
-"""/chat endpoint tests: action and clarify placeholders, knowledge retrieval + generation.
+"""/chat endpoint tests: action placeholders, clarify for empty input, knowledge retrieval + generation.
 
 Gemini is always mocked here (see conftest.py); no live API calls. Knowledge tests search
 the fictional sample documents in tests/fixtures (the sample_knowledge fixture).
@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from google.genai import errors
 
-from app.knowledge import RETRIEVAL_LABEL
+from app.knowledge import ACTIVE_DOCUMENTS, RETRIEVAL_LABEL
 from app.main import app
 from tests.conftest import FakeInteraction
 
@@ -41,11 +41,57 @@ def test_update_action_changes_nothing(client):
     assert "No record was changed" in data["reply"]
 
 
-def test_clarify_route(client):
-    data = ask(client, "hello")
+@pytest.mark.parametrize("message", ["", "   "])
+def test_empty_message_asks_to_clarify_never_acts(client, message):
+    data = ask(client, message)
     assert data["route"] == "clarify"
     assert data["passages"] == []
     assert data["generation"] is None
+    assert "DEMO DATA" not in data["reply"]
+
+
+@pytest.mark.parametrize(
+    "message, function_name, demo_text",
+    [
+        ("add a contact", "create_contact_draft", "Draft only. Nothing was saved to any CRM."),
+        ("הוסף איש קשר", "create_contact_draft", "Draft only. Nothing was saved to any CRM."),
+    ],
+)
+def test_add_command_runs_add_demo(client, message, function_name, demo_text):
+    data = ask(client, message)
+    assert data["route"] == "action"
+    assert data["route_source"] == "keyword-stub"
+    assert f"{function_name}()" in data["reply"]
+    assert "DEMO DATA - not a real CRM record" in data["reply"]
+    assert demo_text in data["reply"]
+    assert data["passages"] == []
+    assert data["generation"] is None
+
+
+# Questions over the real user guides (the app's own store). Gemini is mocked.
+@pytest.mark.parametrize(
+    "message, expected_file",
+    [
+        ("what is jewishpoints", "about_english.md"),
+        ("מה זה נקודות יהודיות", None),  # any guide passage
+        ("why can't I see a contact that the assistant added?", None),
+        ("how do I add a contact?", None),
+    ],
+)
+def test_questions_go_to_guide_retrieval(client, fake_gemini, message, expected_file):
+    fake_gemini.reply = FakeInteraction("INSUFFICIENT_SOURCES")
+    data = ask(client, message)
+    assert data["route"] == "knowledge"
+    assert data["route_source"] == "keyword-stub"
+    assert "DEMO DATA" not in data["reply"]
+    filenames = [p["filename"] for p in data["passages"]]
+    assert len(filenames) == 3
+    assert set(filenames) <= set(ACTIVE_DOCUMENTS), filenames
+    if expected_file:
+        assert expected_file in filenames, filenames
+    # One mocked generation request, carrying the question.
+    assert len(fake_gemini.requests) == 1
+    assert fake_gemini.requests[0]["input"].startswith(f"Question: {message}")
 
 
 @pytest.mark.parametrize(

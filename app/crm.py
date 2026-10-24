@@ -31,11 +31,10 @@ def create_contact_draft(name: str) -> dict:
     }
 
 
-def pick_placeholder(message: str) -> tuple[str, dict]:
-    """Choose which placeholder would run for an action message."""
-    text = message.lower()
-    if "update" in text:
+def pick_placeholder(message: str, action: str) -> tuple[str, dict]:
+    """Choose which placeholder would run for an action ("find", "add" or "update")."""
+    if action == "update":
         return "update_contact_field", update_contact_field("demo-001", "phone", "000-000-0001")
-    if "add" in text:
+    if action == "add":
         return "create_contact_draft", create_contact_draft("New Contact Example")
     return "find_contact", find_contact(message)

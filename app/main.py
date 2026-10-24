@@ -40,7 +40,7 @@ def chat(request: ChatRequest):
     generation_info = None
 
     if route == "action":
-        function_name, result = crm.pick_placeholder(request.message)
+        function_name, result = crm.pick_placeholder(request.message, plan["action"])
         reply = (
             f"Placeholder function that would run: {function_name}()\n"
             f"Demo result:\n{json.dumps(result, indent=2)}"
@@ -50,7 +50,7 @@ def chat(request: ChatRequest):
         generated = generation.generate_answer(request.message, passages)
         generation_info = generated.as_dict()
         reply = knowledge.format_reply(request.message, passages, generated)
-    else:
+    else:  # clarify: empty message
         reply = (
             "What would you like to do? You can ask me to find, add or update "
             "a contact, or ask how to do something."
