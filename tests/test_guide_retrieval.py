@@ -30,3 +30,20 @@ def test_guide_question_finds_expected_passage_first(question, filename, expecte
     assert len(results) == 3
     assert results[0]["filename"] == filename, ranking
     assert expected_text in results[0]["text"], ranking
+
+
+# "What is it?" in both languages must retrieve the system's explanation, not
+# only the guide title and the "1. What this system is" heading (instructions7).
+WHAT_IS_QUESTIONS = [
+    ("what is jewishpoints", "about_english.md", "A bilingual (Hebrew/English) CRM"),
+    ("מה זה נקודות יהודיות", "about_hebrew.md", "מערכת CRM דו-לשונית"),
+]
+
+
+@pytest.mark.parametrize("question, filename, explanation", WHAT_IS_QUESTIONS)
+def test_what_is_question_retrieves_the_explanation_first(question, filename, explanation):
+    results = knowledge.search(question)
+    ranking = [(r["filename"], r["score"], r["heading"], r["text"][:60]) for r in results]
+    print(question, ranking)
+    assert results[0]["filename"] == filename, ranking
+    assert results[0]["text"].startswith(explanation), ranking

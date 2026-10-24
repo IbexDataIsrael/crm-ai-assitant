@@ -89,3 +89,57 @@ def test_neighbouring_chunks_overlap():
 def test_unsplittable_text_raises_instead_of_truncating():
     with pytest.raises(ValueError):
         chunk_document("x.md", "# H\nabc", lambda text: 99, max_tokens=10)
+
+
+# --- Document and section context (instructions7) ---------------------------
+
+GUIDE_CONTEXT = [
+    # (file, document title, first section, start of that section's explanation)
+    ("about_english.md", "Jewish Points CRM - User Guide", "1. What this system is", "A bilingual (Hebrew/English) CRM"),
+    ("about_hebrew.md", "נקודות יהודיות CRM - מדריך למשתמש", "1. מהי המערכת הזו?", "מערכת CRM דו-לשונית"),
+]
+
+
+def guide_chunks():
+    embedder = get_embedder()
+    return chunk_folder(KNOWLEDGE_DIR, embedder.count_tokens, embedder.max_tokens, filenames=ACTIVE_DOCUMENTS)
+
+
+@pytest.mark.parametrize("filename, title, section, explanation", GUIDE_CONTEXT)
+def test_intro_explanation_keeps_product_and_section_context(filename, title, section, explanation):
+    """The chunk that explains the system carries the guide title and the section title it belongs to."""
+    chunk = next(c for c in guide_chunks() if c.filename == filename and c.text.startswith(explanation))
+    assert chunk.title == title
+    assert chunk.heading == section
+    assert title in chunk.embed_text and section in chunk.embed_text
+
+
+@pytest.mark.parametrize("filename, title, section, explanation", GUIDE_CONTEXT)
+def test_every_guide_chunk_has_body_text_and_context(filename, title, section, explanation):
+    """No chunk is just a title or section heading; every chunk knows its guide and section."""
+    chunks = [c for c in guide_chunks() if c.filename == filename]
+    numbered_sections = {c.heading for c in chunks}
+    assert section in numbered_sections and len(numbered_sections) == 7
+    for chunk in chunks:
+        assert chunk.title == title
+        lines = chunk.text.splitlines()
+        assert lines and not all(line == title or line in numbered_sections for line in lines), chunk
+
+
+def test_numbered_lines_are_steps_when_the_document_has_markdown_headings():
+    """Fixtures use '#' headings and numbered steps: the steps stay body text."""
+    doc = "# Visits\n## Before a visit\n1. Confirm the time\n2. Tell the coordinator"
+    chunks = chunk_document("v.md", doc, word_count, max_tokens=50)
+    assert [(c.title, c.heading, c.text) for c in chunks] == [
+        ("Visits", "Before a visit", "1. Confirm the time\n2. Tell the coordinator")
+    ]
+
+
+def test_plain_title_and_numbered_sections_without_markdown_headings():
+    doc = "My Guide\n\n1. What it is\nA tool for things.\n2. Signing in\nUse your password."
+    chunks = chunk_document("g.md", doc, word_count, max_tokens=50)
+    assert [(c.title, c.heading, c.text) for c in chunks] == [
+        ("My Guide", "1. What it is", "A tool for things."),
+        ("My Guide", "2. Signing in", "Use your password."),
+    ]
+    assert chunks[0].embed_text == "My Guide > 1. What it is\nA tool for things."
