@@ -25,6 +25,7 @@ log = logging.getLogger("uvicorn.error")
 
 class Embedder(Protocol):
     max_tokens: int
+    model_id: str  # model + revision; part of each stored chunk's content hash
 
     def count_tokens(self, text: str) -> int: ...
 
@@ -38,6 +39,7 @@ class LocalSentenceTransformer:
         started = time.perf_counter()
         self.model = SentenceTransformer(model_name, revision=revision, device="cpu")
         self.load_seconds = time.perf_counter() - started
+        self.model_id = f"{model_name}@{revision}"
         self.tokenizer = self.model.tokenizer
         # The model reads at most max_seq_length tokens and silently drops the
         # rest, so that (not the tokenizer's larger default) is the real limit.

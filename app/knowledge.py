@@ -1,5 +1,8 @@
 """Knowledge route: local semantic retrieval over knowledge/, plus the reply text.
 
+The guide chunks and their vectors live in PostgreSQL + pgvector (app/vectorstore.py);
+startup syncs the table with the guides, re-embedding only what changed.
+
 Retrieval returns the three most relevant passages with scores, filenames and
 headings. If answer generation (Gemini or Claude) succeeded, its cited answer is shown above the
 passages; otherwise the reply says why there is no answer and shows the
@@ -24,7 +27,7 @@ TOP_K = 3
 
 @lru_cache(maxsize=1)
 def get_store() -> VectorStore:
-    """Build the in-memory store once per process (called at app startup)."""
+    """Sync the guides into the database once per process (called at app startup)."""
     store = VectorStore(get_embedder())
     store.build(KNOWLEDGE_DIR, filenames=ACTIVE_DOCUMENTS)
     return store

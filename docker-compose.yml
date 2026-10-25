@@ -5,8 +5,37 @@ services:
       - .:/code
     ports:
       - "127.0.0.1:8011:8000"
+    environment:
+      DATABASE_URL: postgresql://crm_assistant@db:5432/crm_assistant
     # GEMINI_API_KEY (and optional GEMINI_MODEL) come from the git- and
     # docker-ignored .env at container start - never baked into the image.
     env_file:
       - path: .env
         required: false
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # PostgreSQL + pgvector for the guide chunks and their vectors.
+  # No "ports:" on purpose: the database is reachable only from containers on
+  # this compose network (the app), never from the host or the internet.
+  # Because of that it uses "trust" login (no password to keep secret); add a
+  # password before ever publishing the port.
+  db:
+    image: pgvector/pgvector:0.8.2-pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
+    environment:
+      POSTGRES_USER: crm_assistant
+      POSTGRES_DB: crm_assistant
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      # Named volume: survives "docker compose down" and container recreation.
+      # Only "docker compose down -v" (or "docker volume rm") deletes it.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_assistant -d crm_assistant"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  pgdata:

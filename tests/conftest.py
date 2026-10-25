@@ -1,22 +1,43 @@
-"""Shared test setup: tests never see a real key and can never call Gemini."""
+"""Shared test setup: tests never see a real key and can never call Gemini,
+and they use their own database, never the app's rows."""
 
+import os
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from app import generation, knowledge
 from app.embeddings import get_embedder
-from app.vectorstore import VectorStore
+from app.vectorstore import VectorStore, database_url
 
 # The fictional sample documents, kept as fixed test data (no longer searched by the app).
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 SAMPLE_DOCUMENTS = ("donations.md", "sample.md", "visits.md")
+TEST_DATABASE = "crm_assistant_test"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def test_database():
+    """Point every store at a separate test database on the same Postgres server.
+
+    It is created on first use and kept, so later runs reuse its vectors.
+    """
+    app_url = database_url()
+    with psycopg.connect(app_url, autocommit=True) as conn:
+        if not conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DATABASE,)).fetchone():
+            conn.execute(f"CREATE DATABASE {TEST_DATABASE}")
+    test_url = app_url.rsplit("/", 1)[0] + "/" + TEST_DATABASE
+    os.environ["DATABASE_URL"] = test_url
+    knowledge.get_store.cache_clear()
+    yield test_url
+    os.environ["DATABASE_URL"] = app_url
 
 
 @pytest.fixture(scope="session")
-def sample_store():
+def sample_store(test_database):
     """A vector store built from tests/fixtures only, with the real local model."""
-    store = VectorStore(get_embedder())
+    store = VectorStore(get_embedder(), collection="test_fixtures")
     store.build(FIXTURES_DIR, filenames=SAMPLE_DOCUMENTS)
     return store
 
