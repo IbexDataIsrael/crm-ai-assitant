@@ -4,11 +4,14 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from typing import Optional
 
-from app import crm, generation, knowledge, planner
+from fastapi import Depends, FastAPI
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, ConfigDict, Field
+
+from app import crm, crm_api, generation, knowledge, planner
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -63,3 +66,93 @@ def chat(request: ChatRequest):
         "passages": passages,
         "generation": generation_info,
     }
+
+
+# --- CRM contact-draft bridge (structured fields, no AI) -------------------
+# LOCALHOST ONLY: this service has no authentication of its own. The caller's
+# CRM bearer token is forwarded to CRM_API_URL only; the CRM decides who the
+# user is, their organization and what they may do. See app/crm_api.py.
+
+crm_bearer = HTTPBearer(auto_error=False, description="The user's own CRM access token (JWT).")
+
+
+class ContactDraftFields(BaseModel):
+    """Same fields as the CRM's ContactDraftFields. Extra keys (organization_id, user_id ...) are refused."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+
+
+class ContactDraftProposalRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"fields": {"first_name": "Dana", "last_name": "Levi", "phone": "0521234567"}}]},
+    )
+
+    fields: ContactDraftFields
+
+
+class ContactDraftConfirmRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={"examples": [{"payload_hash": "3f1c...e9 (from the proposal)"}]},
+    )
+
+    payload_hash: str = Field(min_length=1)
+    # Optional: the details the user saw; the CRM refuses them if they differ from the proposal.
+    fields: Optional[ContactDraftFields] = None
+
+
+def _bearer_token(credentials: Optional[HTTPAuthorizationCredentials]) -> Optional[str]:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    token = credentials.credentials.strip()
+    return token or None
+
+
+def _missing_token() -> JSONResponse:
+    return JSONResponse(
+        status_code=401,
+        content={"status": "unauthorized", "message": "Send the user's CRM token as 'Authorization: Bearer <token>'."},
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+@app.post("/crm/contact-drafts/proposals")
+def propose_contact_draft(
+    request: ContactDraftProposalRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(crm_bearer),
+):
+    """Ask the CRM for a contact-draft proposal. Nothing is saved.
+
+    Answers: needs_information (200), proposal (201), invalid (422), or a failure.
+    """
+    token = _bearer_token(credentials)
+    if token is None:
+        return _missing_token()
+    result = crm_api.request_proposal(token, request.fields.model_dump())
+    return JSONResponse(status_code=result.http_status, content=result.body)
+
+
+@app.post("/crm/contact-drafts/proposals/{proposal_id}/confirm")
+def confirm_contact_draft(
+    proposal_id: str,
+    request: ContactDraftConfirmRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(crm_bearer),
+):
+    """Explicitly confirm one proposal; the CRM saves the draft at most once.
+
+    Answers: created (201, or 200 with replayed=true on a retry), uncertain
+    (504/502, confirm the same proposal again), or a failure.
+    """
+    token = _bearer_token(credentials)
+    if token is None:
+        return _missing_token()
+    fields = request.fields.model_dump() if request.fields is not None else None
+    result = crm_api.confirm_proposal(token, proposal_id, request.payload_hash, fields)
+    return JSONResponse(status_code=result.http_status, content=result.body)

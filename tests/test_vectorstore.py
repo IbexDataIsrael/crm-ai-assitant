@@ -148,3 +148,23 @@ def test_sql_score_matches_cosine_similarity_of_the_stored_vectors():
 def test_tests_never_use_the_app_database(test_database):
     assert knowledge.get_store().dsn == test_database
     assert psycopg.conninfo.conninfo_to_dict(test_database)["dbname"] == "crm_assistant_test"
+
+
+def test_tests_log_in_as_the_restricted_test_role(test_database):
+    with psycopg.connect(test_database) as conn:
+        user, superuser, createdb = conn.execute(
+            "SELECT current_user, rolsuper, rolcreatedb FROM pg_roles WHERE rolname = current_user"
+        ).fetchone()
+    assert (user, superuser, createdb) == ("crm_test", False, False)
+
+
+def test_test_role_cannot_open_the_app_database(test_database):
+    app_database = psycopg.conninfo.make_conninfo(test_database, dbname="crm_assistant")
+    with pytest.raises(psycopg.OperationalError):
+        psycopg.connect(app_database, connect_timeout=10)
+
+
+def test_test_role_cannot_change_the_schema(test_database):
+    with psycopg.connect(test_database) as conn:
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute("CREATE TABLE not_allowed (id integer)")

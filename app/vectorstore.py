@@ -28,6 +28,7 @@ from pathlib import Path
 
 import numpy as np
 import psycopg
+from psycopg.conninfo import make_conninfo
 
 from app.chunking import Chunk, chunk_folder
 from app.embeddings import Embedder
@@ -35,7 +36,11 @@ from app.embeddings import Embedder
 log = logging.getLogger("uvicorn.error")
 
 # The db service in docker-compose.yml. Reachable only on the compose network.
-DEFAULT_DATABASE_URL = "postgresql://crm_assistant@db:5432/crm_assistant"
+DEFAULT_DB_HOST = "db"
+# Database and login role per prefix: APP for the app, TEST for the test suite.
+# Passwords come from .env (APP_DB_PASSWORD, TEST_DB_PASSWORD), never from code.
+DEFAULT_DB_NAMES = {"APP": "crm_assistant", "TEST": "crm_assistant_test"}
+DEFAULT_DB_USERS = {"APP": "crm_app", "TEST": "crm_test"}
 EMBEDDING_DIMENSIONS = 384
 
 SCHEMA = f"""
@@ -56,8 +61,26 @@ CREATE TABLE IF NOT EXISTS chunks (
 """
 
 
+def database_dsn(prefix: str = "APP") -> str:
+    """Connection string for the APP or TEST role, from separate variables.
+
+    make_conninfo quotes every value, so a password with spaces, quotes, '@',
+    '/' or '%' needs no URL encoding. An unset password is left out (the
+    server then rejects the login with "no password supplied").
+    """
+    password = os.environ.get(f"{prefix}_DB_PASSWORD")
+    return make_conninfo(
+        host=os.environ.get("DB_HOST", DEFAULT_DB_HOST),
+        dbname=os.environ.get(f"{prefix}_DB_NAME", DEFAULT_DB_NAMES[prefix]),
+        user=os.environ.get(f"{prefix}_DB_USER", DEFAULT_DB_USERS[prefix]),
+        **({"password": password} if password else {}),
+    )
+
+
 def database_url() -> str:
-    return os.environ.get("DATABASE_URL", DEFAULT_DATABASE_URL)
+    """The connection string stores use: DATABASE_URL if set (tests point it at
+    their own database), otherwise the app role's."""
+    return os.environ.get("DATABASE_URL") or database_dsn("APP")
 
 
 def content_hash(model_id: str, embed_text: str) -> str:
@@ -105,7 +128,11 @@ class VectorStore:
             wanted[(chunk.filename, position)] = (chunk, content_hash(self.embedder.model_id, chunk.embed_text))
 
         with self.connect() as conn:
-            conn.execute(SCHEMA)
+            # The admin creates the table (scripts/db/setup-roles.sql) and the
+            # app role may only read and write rows, so DDL runs only where the
+            # table is missing (e.g. a database without that setup).
+            if conn.execute("SELECT to_regclass('chunks')").fetchone()[0] is None:
+                conn.execute(SCHEMA)
             # One indexer at a time per collection (e.g. app startup and a test run).
             conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (self.collection,))
             stored_rows = conn.execute(

@@ -6,7 +6,14 @@ services:
     ports:
       - "127.0.0.1:8011:8000"
     environment:
-      DATABASE_URL: postgresql://crm_assistant@db:5432/crm_assistant
+      # Database logins: each use has its own database and restricted role.
+      # Passwords come from .env (APP_DB_PASSWORD, TEST_DB_PASSWORD), written
+      # by scripts/set-db-passwords.ps1 - never here.
+      DB_HOST: db
+      APP_DB_NAME: crm_assistant
+      APP_DB_USER: crm_app
+      TEST_DB_NAME: crm_assistant_test
+      TEST_DB_USER: crm_test
     # GEMINI_API_KEY (and optional GEMINI_MODEL) come from the git- and
     # docker-ignored .env at container start - never baked into the image.
     env_file:
@@ -19,18 +26,25 @@ services:
   # PostgreSQL + pgvector for the guide chunks and their vectors.
   # No "ports:" on purpose: the database is reachable only from containers on
   # this compose network (the app), never from the host or the internet.
-  # Because of that it uses "trust" login (no password to keep secret); add a
-  # password before ever publishing the port.
+  # Login rules: scripts/db/pg_hba.conf (mounted below) - passwords (SCRAM)
+  # over the network, each role to its own database, no trust; the admin role
+  # only through the local socket inside this container.
   db:
     image: pgvector/pgvector:0.8.2-pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "ident_file=/etc/postgresql/pg_ident.conf"]
     environment:
+      # These only matter when an EMPTY volume is initialised. Without trust the
+      # image then also needs POSTGRES_PASSWORD, so a fresh init stops with an
+      # error instead of silently allowing passwordless logins.
       POSTGRES_USER: crm_assistant
       POSTGRES_DB: crm_assistant
-      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
     volumes:
       # Named volume: survives "docker compose down" and container recreation.
       # Only "docker compose down -v" (or "docker volume rm") deletes it.
       - pgdata:/var/lib/postgresql
+      - ./scripts/db/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./scripts/db/pg_ident.conf:/etc/postgresql/pg_ident.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crm_assistant -d crm_assistant"]
       interval: 2s

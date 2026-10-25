@@ -1,37 +1,36 @@
 """Shared test setup: tests never see a real key and can never call Gemini,
-and they use their own database, never the app's rows."""
+and they use their own database and login role, never the app's."""
 
 import os
 from pathlib import Path
 
-import psycopg
 import pytest
 
-from app import generation, knowledge
+from app import crm_api, generation, knowledge
 from app.embeddings import get_embedder
-from app.vectorstore import VectorStore, database_url
+from app.vectorstore import VectorStore, database_dsn
 
 # The fictional sample documents, kept as fixed test data (no longer searched by the app).
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 SAMPLE_DOCUMENTS = ("donations.md", "sample.md", "visits.md")
-TEST_DATABASE = "crm_assistant_test"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def test_database():
-    """Point every store at a separate test database on the same Postgres server.
+    """Point every store at the test database, logged in as the test role (crm_test).
 
-    It is created on first use and kept, so later runs reuse its vectors.
+    The database, its table and the role come from scripts/db/setup-roles.sql;
+    crm_test can neither create databases nor reach the app's database.
     """
-    app_url = database_url()
-    with psycopg.connect(app_url, autocommit=True) as conn:
-        if not conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TEST_DATABASE,)).fetchone():
-            conn.execute(f"CREATE DATABASE {TEST_DATABASE}")
-    test_url = app_url.rsplit("/", 1)[0] + "/" + TEST_DATABASE
-    os.environ["DATABASE_URL"] = test_url
+    test_dsn = database_dsn("TEST")
+    previous = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = test_dsn
     knowledge.get_store.cache_clear()
-    yield test_url
-    os.environ["DATABASE_URL"] = app_url
+    yield test_dsn
+    if previous is None:
+        del os.environ["DATABASE_URL"]
+    else:
+        os.environ["DATABASE_URL"] = previous
 
 
 @pytest.fixture(scope="session")
@@ -52,6 +51,7 @@ def sample_knowledge(monkeypatch, sample_store):
 # to check client settings offline - never to send a request.
 REAL_MAKE_CLIENT = generation.make_client
 REAL_MAKE_ANTHROPIC_CLIENT = generation.make_anthropic_client
+REAL_MAKE_CRM_CLIENT = crm_api.make_http_client
 
 
 @pytest.fixture(autouse=True)
@@ -65,6 +65,14 @@ def no_live_api_calls(monkeypatch):
 
     monkeypatch.setattr(generation, "make_client", refuse)
     monkeypatch.setattr(generation, "make_anthropic_client", refuse)
+
+    # No real CRM either: tests that need it install a mock transport.
+    monkeypatch.delenv("CRM_API_URL", raising=False)
+
+    def refuse_crm(base_url):
+        raise AssertionError("A test tried to create a real CRM HTTP client")
+
+    monkeypatch.setattr(crm_api, "make_http_client", refuse_crm)
 
 
 class FakeInteraction:
