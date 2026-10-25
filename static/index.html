@@ -28,13 +28,44 @@
     form { display: flex; gap: 8px; }
     input { flex: 1; font-size: 20px; padding: 10px; min-width: 0; }
     button { font-size: 20px; padding: 10px 20px; cursor: pointer; }
+    button:disabled { cursor: not-allowed; color: #777; }
+    .hidden { display: none !important; }
+    .panel { border: 1px solid #ccc; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+    #login-form { flex-direction: column; align-items: stretch; }
+    #login-form label { font-size: 16px; color: #333; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .choices { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+    .soon { font-size: 14px; font-weight: bold; color: #555; background: #eee; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+    .live { color: #8a4b00; font-weight: bold; }
   </style>
 </head>
 <body>
   <h1>CRM Assistant</h1>
-  <p class="demo">Demo - routing is a keyword stub (not AI). Knowledge questions search the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. CRM actions return demo data - no live CRM connection.</p>
+  <p class="demo">Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. Typed "find" / "update" commands still return demo data.</p>
+  <p class="live">Create a contact talks to the real CRM at CRM_API_URL: a draft you confirm with "yes" is saved there as a real record.</p>
+
+  <section id="login-panel" class="panel">
+    <form id="login-form">
+      <label for="username">CRM username or email</label>
+      <input id="username" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <button type="submit" id="login-button">Log in</button>
+    </form>
+    <div id="org-choice" class="hidden">
+      <p>This login belongs to several organizations. Choose one:</p>
+      <div id="org-buttons" class="choices"></div>
+    </div>
+    <div id="login-error" class="section error hidden"></div>
+  </section>
+
+  <div id="session" class="row hidden">
+    <span class="small">Logged in to the CRM.</span>
+    <button type="button" id="logout">Log out</button>
+  </div>
+
   <div id="log"></div>
-  <form id="form">
+  <form id="form" class="hidden">
     <input id="message" autocomplete="off" placeholder="Type a message..." aria-label="Message">
     <button type="submit">Send</button>
   </form>
@@ -132,26 +163,213 @@
       div.scrollIntoView();
     }
 
-    document.getElementById("form").addEventListener("submit", async (e) => {
+    // --- Login, menu and the conversation -----------------------------------
+    // The CRM token lives only in this variable: never in localStorage,
+    // sessionStorage or cookies. Logging out, a new login or any 401 drops it
+    // together with the conversation state (fields and pending proposal).
+    let token = null;
+    let intent = null;        // set by the menu, never from free text
+    let conversation = null;  // create_contact state, as the server returned it
+    const language = (navigator.language || "en").toLowerCase().startsWith("he") ? "he" : "en";
+
+    const LOGIN_ERRORS = {
+      invalid_credentials: "Incorrect username or password. / שם משתמש או סיסמה שגויים.",
+      not_verified: "This account's email is not verified yet. / כתובת האימייל של החשבון עדיין לא אומתה.",
+      org_pending: "Your organization is still waiting for approval. / הארגון שלכם עדיין ממתין לאישור.",
+      org_disabled: "Your organization has been disabled. Contact support. / הארגון שלכם הושבת. פנו לתמיכה.",
+      login_refused: "The CRM refused this login. / ה-CRM דחה את ההתחברות.",
+      rate_limited: "Too many login attempts. Wait a little and try again. / יותר מדי ניסיונות התחברות. המתינו ונסו שוב.",
+      crm_not_configured: "The assistant is not connected to a CRM (CRM_API_URL is not set). / העוזר אינו מחובר ל-CRM.",
+      crm_unreachable: "Could not reach the CRM. / לא ניתן להגיע ל-CRM.",
+      crm_timeout: "The CRM did not answer in time. / ה-CRM לא ענה בזמן.",
+      invalid_request: "Enter a username (or email) and a password. / הזינו שם משתמש (או אימייל) וסיסמה.",
+    };
+
+    const loginForm = document.getElementById("login-form");
+    const username = document.getElementById("username");
+    const password = document.getElementById("password");
+    const loginError = document.getElementById("login-error");
+    const orgChoice = document.getElementById("org-choice");
+    const orgButtons = document.getElementById("org-buttons");
+    const chatForm = document.getElementById("form");
+
+    function show(node, visible) { node.classList.toggle("hidden", !visible); }
+
+    function clearConversation() {
+      intent = null;
+      conversation = null;
+    }
+
+    function logout(reason) {
+      token = null;
+      clearConversation();
+      password.value = "";
+      show(orgChoice, false);
+      show(loginForm, true);
+      show(document.getElementById("login-panel"), true);
+      show(document.getElementById("session"), false);
+      show(chatForm, false);
+      log.replaceChildren();
+      if (reason) {
+        loginError.textContent = reason;
+        show(loginError, true);
+      }
+    }
+
+    function loggedIn(newToken) {
+      clearConversation();  // a new token never inherits earlier state
+      log.replaceChildren();
+      token = newToken;
+      username.value = "";
+      password.value = "";
+      show(document.getElementById("login-panel"), false);
+      show(document.getElementById("session"), true);
+      show(chatForm, true);
+      addMenu();
+    }
+
+    async function login(organizationId) {
+      show(loginError, false);
+      const body = { username: username.value, password: password.value };
+      if (organizationId !== undefined) body.organization_id = organizationId;
+      let res, data;
+      try {
+        res = await fetch("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        data = await res.json();
+      } catch (err) {
+        password.value = "";
+        loginError.textContent = "Could not reach the assistant server.";
+        show(loginError, true);
+        return;
+      }
+      if (res.ok && data.status === "logged_in") {
+        loggedIn(data.access_token);
+        return;
+      }
+      if (res.ok && data.status === "choose_organization") {
+        // The password stays in its field until an organization is chosen, then it is cleared.
+        orgButtons.replaceChildren();
+        data.organizations.forEach(org => {
+          const b = el("button", null, org.name);
+          b.type = "button";
+          b.addEventListener("click", () => login(org.id));
+          orgButtons.appendChild(b);
+        });
+        show(loginForm, false);
+        show(orgChoice, true);
+        return;
+      }
+      password.value = "";
+      show(orgChoice, false);
+      show(loginForm, true);
+      loginError.textContent = LOGIN_ERRORS[data.status] || ("Login failed (" + (data.status || res.status) + ").");
+      show(loginError, true);
+    }
+
+    loginForm.addEventListener("submit", (e) => { e.preventDefault(); login(); });
+    document.getElementById("logout").addEventListener("click", () => logout());
+
+    function addMenu() {
+      const div = el("div", "msg bot");
+      div.appendChild(el("div", "text", "What do you want to do? / מה תרצו לעשות?"));
+      const choices = el("div", "choices");
+      const create = el("button", null, "Create a contact / יצירת איש קשר");
+      create.type = "button";
+      create.addEventListener("click", () => choose("create_contact", create.textContent));
+      const update = el("button", null, "Update a contact / עדכון איש קשר");
+      update.type = "button";
+      update.disabled = true;  // not built: never calls anything
+      update.appendChild(el("span", "soon", "coming later / בקרוב"));
+      const ask = el("button", null, "Ask a question / שאלה");
+      ask.type = "button";
+      ask.addEventListener("click", () => choose("ask_question", ask.textContent));
+      choices.append(create, update, ask);
+      div.appendChild(choices);
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    function choose(newIntent, label) {
+      clearConversation();
+      intent = newIntent;
+      addUser(label);
+      sendTurn("");
+    }
+
+    function addConversationReply(data) {
+      const div = el("div", "msg bot");
+      div.appendChild(el("div", "text", data.reply));
+      const s = data.state;
+      const waiting = data.awaiting_confirmation || (s && s.pending && s.pending.uncertain) || (s && s.restart_offered);
+      if (waiting) {
+        const he = s && s.language === "he";
+        const choices = el("div", "choices");
+        const yes = el("button", null, he ? "כן" : "yes");
+        yes.type = "button";
+        yes.addEventListener("click", () => { addUser(yes.textContent); sendTurn(yes.textContent); });
+        const no = el("button", null, he ? "לא" : "no");
+        no.type = "button";
+        no.addEventListener("click", () => { addUser(no.textContent); sendTurn(no.textContent); });
+        choices.append(yes, no);
+        div.appendChild(choices);
+      }
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    async function sendTurn(message) {
+      const sentWith = token;
+      const headers = { "Content-Type": "application/json" };
+      if (intent === "create_contact") headers["Authorization"] = "Bearer " + token;
+      const body = { intent, message, language };
+      if (intent === "create_contact" && conversation) body.state = conversation;
+      try {
+        const res = await fetch("/assistant/turn", { method: "POST", headers, body: JSON.stringify(body) });
+        if (token !== sentWith) return;  // logged out or another login meanwhile: drop the answer
+        if (res.status === 401) {
+          const data = await res.json().catch(() => ({}));
+          logout(data.reply || "Your CRM login is no longer valid. Please log in again.");
+          return;
+        }
+        if (!res.ok) {
+          addRequestError("The server returned HTTP " + res.status + ".");
+          return;
+        }
+        const data = await res.json();
+        if (data.intent === "ask_question" && data.outcome === "answered") {
+          addBot(data);
+        } else if (data.intent === "create_contact") {
+          conversation = data.state;
+          addConversationReply(data);
+          if (data.logout) logout(data.reply);
+        } else {
+          addConversationReply(data);
+        }
+        if (data.show_menu) {
+          clearConversation();
+          addMenu();
+        }
+      } catch (err) {
+        addRequestError("Could not reach the server (" + err + ").");
+      }
+    }
+
+    chatForm.addEventListener("submit", (e) => {
       e.preventDefault();
       const message = input.value.trim();
       if (!message) return;
       addUser(message);
       input.value = "";
-      try {
-        const res = await fetch("/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message }),
-        });
-        if (!res.ok) {
-          addRequestError("The server returned HTTP " + res.status + ".");
-          return;
-        }
-        addBot(await res.json());
-      } catch (err) {
-        addRequestError("Could not reach the server (" + err + ").");
+      if (!intent) {
+        addConversationReply({ reply: "Please choose from the menu first. / אנא בחרו קודם מהתפריט." });
+        addMenu();
+        return;
       }
+      sendTurn(message);
     });
   </script>
 </body>

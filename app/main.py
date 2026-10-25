@@ -4,14 +4,16 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from typing import Optional
+from typing import Literal, Optional
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import crm, crm_api, generation, knowledge, planner
+from app import contact_chat, crm, crm_api, generation, knowledge, planner
+from app.contact_chat import ContactDraftFields, ConversationState
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -42,7 +44,9 @@ def chat(request: ChatRequest):
     passages = []
     generation_info = None
 
-    if route == "action":
+    if route == "action" and plan["action"] == "add":
+        reply = crm.ADD_CONTACT_POINTER
+    elif route == "action":
         function_name, result = crm.pick_placeholder(request.message, plan["action"])
         reply = (
             f"Placeholder function that would run: {function_name}()\n"
@@ -74,18 +78,6 @@ def chat(request: ChatRequest):
 # user is, their organization and what they may do. See app/crm_api.py.
 
 crm_bearer = HTTPBearer(auto_error=False, description="The user's own CRM access token (JWT).")
-
-
-class ContactDraftFields(BaseModel):
-    """Same fields as the CRM's ContactDraftFields. Extra keys (organization_id, user_id ...) are refused."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    phone: Optional[str] = None
-    email: Optional[str] = None
-    address: Optional[str] = None
 
 
 class ContactDraftProposalRequest(BaseModel):
@@ -156,3 +148,91 @@ def confirm_contact_draft(
     fields = request.fields.model_dump() if request.fields is not None else None
     result = crm_api.confirm_proposal(token, proposal_id, request.payload_hash, fields)
     return JSONResponse(status_code=result.http_status, content=result.body)
+
+
+# --- Login proxy for the chat page -------------------------------------------
+# The page posts the form here (same origin); this forwards it once to the
+# CRM's POST /api/auth/token at CRM_API_URL, without following redirects. The
+# password is never logged, stored or sent anywhere else; the token goes back
+# to the page, which keeps it in memory only. The body is parsed by hand so a
+# malformed request is refused without ever echoing what was sent.
+
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+def _login_refused(message: str) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"status": "invalid_request", "message": message},
+                        headers=NO_STORE)
+
+
+@app.post("/auth/login")
+async def login(request: Request):
+    """Log in to the CRM. Answers: logged_in (with access_token), choose_organization, or a failure."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return _login_refused("Send a JSON object with username and password.")
+    if not isinstance(body, dict) or set(body) - {"username", "password", "organization_id"}:
+        return _login_refused("Send only username, password and, if asked, organization_id.")
+    username, password = body.get("username"), body.get("password")
+    organization_id = body.get("organization_id")
+    if not isinstance(username, str) or not username.strip() or not isinstance(password, str) or not password:
+        return _login_refused("Enter a username (or email) and a password.")
+    if organization_id is not None and (not isinstance(organization_id, int) or isinstance(organization_id, bool)):
+        return _login_refused("organization_id must be a number.")
+    result = await run_in_threadpool(crm_api.login, username.strip(), password, organization_id)
+    return JSONResponse(status_code=result.http_status, content=result.body, headers=NO_STORE)
+
+
+# --- The conversation: quick-menu intent + one turn ---------------------------
+
+UPDATE_NOT_AVAILABLE = {
+    "en": "Updating a contact isn't available yet - it's coming later. Nothing was changed.",
+    "he": "עדכון איש קשר עדיין לא זמין - הוא יגיע בהמשך. לא שונה דבר.",
+}
+ASK_A_QUESTION = {
+    "en": "What would you like to know? I'll search the CRM user guides.",
+    "he": "מה תרצו לדעת? אחפש במדריכים למשתמש של ה-CRM.",
+}
+
+
+class TurnRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # Set by the menu choice, never read from free text.
+    intent: Literal["create_contact", "update_contact", "ask_question"]
+    # Empty when the menu choice was just made.
+    message: str = ""
+    # Held by the page between turns (create_contact only). Contains no token.
+    state: Optional[ConversationState] = None
+    language: Optional[Literal["en", "he"]] = None
+
+
+@app.post("/assistant/turn")
+def assistant_turn(
+    request: TurnRequest,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(crm_bearer),
+):
+    """One step of the conversation. The CRM token (create_contact) goes only to the bridge."""
+    language = request.language or (request.state.language if request.state else "en")
+
+    if request.intent == "update_contact":
+        # Not built: never calls the bridge or the CRM.
+        return {"intent": "update_contact", "outcome": "not_available",
+                "reply": UPDATE_NOT_AVAILABLE[language], "show_menu": True}
+
+    if request.intent == "ask_question":
+        if not request.message.strip():
+            return {"intent": "ask_question", "outcome": "ask", "reply": ASK_A_QUESTION[language]}
+        return {"intent": "ask_question", "outcome": "answered", **chat(ChatRequest(message=request.message))}
+
+    token = _bearer_token(credentials)
+    if token is None:
+        return JSONResponse(status_code=401, headers={"WWW-Authenticate": "Bearer"}, content={
+            "intent": "create_contact", "outcome": "unauthorized", "logout": True,
+            "reply": contact_chat.say(language, "unauthorized"),
+        })
+    if not request.message.strip():
+        return contact_chat.start(language)
+    state = request.state or ConversationState(language=language)
+    return contact_chat.handle_turn(token, request.message, state)

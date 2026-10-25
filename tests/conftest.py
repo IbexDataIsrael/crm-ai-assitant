@@ -164,3 +164,33 @@ def fake_anthropic(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-placeholder-not-a-key")
     monkeypatch.setattr(generation, "make_anthropic_client", lambda api_key: fake)
     return fake
+
+
+class FakeCRM:
+    """A mock CRM: answers each request with the next item (an httpx.Response, or an exception to raise)."""
+
+    def __init__(self):
+        self.answers = []
+        self.requests = []
+
+    def handler(self, request):
+        self.requests.append(request)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    def paths(self):
+        return [request.url.path for request in self.requests]
+
+
+@pytest.fixture
+def fake_crm(monkeypatch):
+    """Set CRM_API_URL and route every CRM call (bridge and login) to a FakeCRM."""
+    import httpx
+
+    monkeypatch.setenv("CRM_API_URL", "http://crm.test:8001/")
+    fake = FakeCRM()
+    monkeypatch.setattr(crm_api, "make_http_client", lambda base_url: httpx.Client(
+        base_url=base_url, transport=httpx.MockTransport(fake.handler), follow_redirects=False))
+    return fake

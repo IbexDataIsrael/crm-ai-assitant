@@ -1,6 +1,7 @@
 """Bridge to the CRM's contact-draft API (POST /api/assistant/proposals and
 POST /api/assistant/proposals/{id}/confirm, in sheepsidebay_crm's
-backend/app/routers/assistant.py).
+backend/app/routers/assistant.py), plus the login proxy for the chat page
+(POST /api/auth/token, backend/app/routers/auth.py).
 
 Structured fields only - no AI, no free-text extraction. The CRM owns
 permissions, organization scoping, validation, saving and idempotency; this
@@ -34,6 +35,13 @@ PROPOSAL_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 # The CRM's 409 messages (routers/assistant.py), used to tell the two cases apart.
 CRM_MISMATCH_DETAIL = "The confirmed details do not match this proposal"
 MAX_MESSAGE_LENGTH = 200
+LOGIN_PATH = "/api/auth/token"
+# The CRM's 403 login codes (auth.py auth_error) -> what the chat page shows.
+LOGIN_REFUSALS = {
+    "auth.error.not_verified": "not_verified",
+    "auth.error.org_pending": "org_pending",
+    "auth.error.org_disabled": "org_disabled",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +179,67 @@ def request_proposal(token: str, fields: dict) -> BridgeResult:
             "draft": data.get("draft"),
         })
     return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {response.status_code}).")
+
+
+def login(username: str, password: str, organization_id: int | None = None) -> BridgeResult:
+    """Log in at the CRM's POST /api/auth/token (form fields username, password,
+    optional organization_id; backend/app/routers/auth.py) and return the token
+    or the organizations to pick from.
+
+    The password is sent once, to CRM_API_URL only, and never logged, stored or
+    returned. The token is returned to the caller (the chat page keeps it in
+    memory) and logged nowhere.
+    """
+    form = {"username": username, "password": password}
+    if organization_id is not None:
+        form["organization_id"] = str(organization_id)
+    try:
+        base_url = crm_base_url()
+        with make_http_client(base_url) as client:
+            response = client.post(LOGIN_PATH, data=form)
+    except CRMConfigError as error:
+        return _failure(503, "crm_not_configured", str(error))
+    except httpx.TimeoutException:
+        logger.warning("CRM login timed out")
+        return _failure(504, "crm_timeout", "The CRM did not answer in time.")
+    except httpx.HTTPError as error:
+        logger.warning("CRM login failed: %s", type(error).__name__)
+        return _failure(502, "crm_unreachable", "Could not reach the CRM.")
+
+    code = response.status_code
+    logger.info("CRM login answer: HTTP %s", code)
+    if 300 <= code < 400:
+        return _failure(502, "crm_redirect_refused",
+                        f"The CRM answered with a redirect ({code}); it was not followed.")
+    detail = _crm_detail(response)
+    crm_code = detail.get("code") if isinstance(detail, dict) else None
+    if code == 401:
+        return _failure(401, "invalid_credentials", "Incorrect username or password.")
+    if code == 403:
+        status = LOGIN_REFUSALS.get(crm_code, "login_refused")
+        return _failure(403, status, "The CRM refused this login.")
+    if code == 429:
+        return _failure(429, "rate_limited", "Too many login attempts. Wait a little and try again.")
+    if code == 422:
+        return _failure(502, "crm_contract_error", "The CRM rejected the login request format.")
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if code == 200 and isinstance(data, dict):
+        if data.get("requires_org_selection"):
+            organizations = [
+                {"id": org["id"], "name": str(org.get("name") or org["id"])}
+                for org in data.get("organizations") or []
+                if isinstance(org, dict) and isinstance(org.get("id"), int)
+            ]
+            if organizations:
+                return BridgeResult(200, {"status": "choose_organization", "organizations": organizations})
+        token = data.get("access_token")
+        if isinstance(token, str) and token:
+            return BridgeResult(200, {"status": "logged_in", "access_token": token})
+        return _failure(502, "crm_contract_error", "The CRM's login answer had no token.")
+    return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {code}).")
 
 
 def confirm_proposal(token: str, proposal_id: str, payload_hash: str, fields: dict | None = None) -> BridgeResult:

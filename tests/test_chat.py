@@ -50,20 +50,15 @@ def test_empty_message_asks_to_clarify_never_acts(client, message):
     assert "DEMO DATA" not in data["reply"]
 
 
-@pytest.mark.parametrize(
-    "message, function_name, demo_text",
-    [
-        ("add a contact", "create_contact_draft", "Draft only. Nothing was saved to any CRM."),
-        ("הוסף איש קשר", "create_contact_draft", "Draft only. Nothing was saved to any CRM."),
-    ],
-)
-def test_add_command_runs_add_demo(client, message, function_name, demo_text):
+@pytest.mark.parametrize("message", ["add a contact", "הוסף איש קשר"])
+def test_add_command_points_to_the_menu_instead_of_demo_data(client, message):
+    """Adding a contact is the real menu conversation now; a typed command saves nothing and shows no demo."""
     data = ask(client, message)
     assert data["route"] == "action"
     assert data["route_source"] == "keyword-stub"
-    assert f"{function_name}()" in data["reply"]
-    assert "DEMO DATA - not a real CRM record" in data["reply"]
-    assert demo_text in data["reply"]
+    assert 'choose "Create a contact" from the menu' in data["reply"]
+    assert "Nothing was saved" in data["reply"]
+    assert "DEMO DATA" not in data["reply"]
     assert data["passages"] == []
     assert data["generation"] is None
 
