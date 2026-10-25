@@ -120,8 +120,8 @@ def test_update_choice_is_not_available_and_never_calls_the_bridge(client, fake_
 
 def test_ask_choice_reaches_guide_questions(client, fake_crm, model, sample_knowledge, fake_gemini):
     fake_gemini.reply = FakeInteraction("Write it in the visit log [1].")
-    assert turn(client, intent="ask_question", headers={}).json()["outcome"] == "ask"
-    data = turn(client, "How do I deal with money a supporter gives me?", intent="ask_question", headers={}).json()
+    assert turn(client, intent="ask_question").json()["outcome"] == "ask"
+    data = turn(client, "How do I deal with money a supporter gives me?", intent="ask_question").json()
     assert data["intent"] == "ask_question" and data["route"] == "knowledge"
     assert data["generation"]["status"] == "answered"
     assert len(data["passages"]) == 3

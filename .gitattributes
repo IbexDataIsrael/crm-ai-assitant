@@ -1,2 +1,5 @@
 # Mounted into the Linux db container: keep LF line endings on every checkout.
 scripts/db/*.conf text eol=lf
+
+# Shell scripts run inside Linux containers or on the server: LF only.
+*.sh text eol=lf

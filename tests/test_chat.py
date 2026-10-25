@@ -10,7 +10,7 @@ from google.genai import errors
 
 from app.knowledge import ACTIVE_DOCUMENTS, RETRIEVAL_LABEL
 from app.main import app
-from tests.conftest import FakeInteraction
+from tests.conftest import TEST_AUTH, FakeInteraction
 
 
 @pytest.fixture(scope="module")
@@ -19,8 +19,13 @@ def client():
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _logged_in(logged_in):
+    """/chat needs a login since instructions17 (tests/test_login_required.py covers the refusals)."""
+
+
 def ask(client, message):
-    response = client.post("/chat", json={"message": message})
+    response = client.post("/chat", json={"message": message}, headers=TEST_AUTH)
     assert response.status_code == 200
     return response.json()
 

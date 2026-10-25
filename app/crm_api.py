@@ -13,9 +13,9 @@ The caller's CRM bearer token is forwarded per request to that one origin
 only: redirects are never followed, and the token is never logged, stored,
 returned or sent anywhere else (no AI provider sees it).
 
-LOCALHOST ONLY. This service has no authentication of its own: anyone who can
-reach it can use it with their own CRM token. Production authentication is
-not settled and must be before deployment.
+Login enforcement (docs/instructions17.md): the chat routes check every
+request's token with the CRM's GET /api/auth/me (verify_login) before any AI
+work. This service still holds no secret of its own.
 """
 
 import logging
@@ -36,6 +36,9 @@ PROPOSAL_ID_PATTERN = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 CRM_MISMATCH_DETAIL = "The confirmed details do not match this proposal"
 MAX_MESSAGE_LENGTH = 200
 LOGIN_PATH = "/api/auth/token"
+# The CRM's "who am I" (backend/app/routers/auth.py me()); used to check a login.
+ME_PATH = "/api/auth/me"
+UNAVAILABLE_MESSAGE = "The service is temporarily unavailable. Please try again in a moment."
 # The CRM's 403 login codes (auth.py auth_error) -> what the chat page shows.
 LOGIN_REFUSALS = {
     "auth.error.not_verified": "not_verified",
@@ -240,6 +243,59 @@ def login(username: str, password: str, organization_id: int | None = None) -> B
             return BridgeResult(200, {"status": "logged_in", "access_token": token})
         return _failure(502, "crm_contract_error", "The CRM's login answer had no token.")
     return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {code}).")
+
+
+def verify_login(token: str) -> BridgeResult:
+    """Ask the CRM whether this token is a valid login right now (GET /api/auth/me).
+
+    The CRM decodes the token and looks the user up (backend/app/deps.py
+    get_current_user): a missing, disabled or deleted user, or a disabled
+    organization, gets 401. Only the CRM knows that, so every protected request
+    asks it - no cache, and no copy of the CRM's signing secret here.
+
+    Fails closed: only a 200 with the expected user data is "valid". 401 ->
+    the login is no longer valid; 403 -> a permission problem; anything else
+    (timeout, no connection, 5xx, redirect, unreadable 200) -> "unavailable",
+    which never logs the user out. The token goes to CRM_API_URL only, in the
+    Authorization header; redirects are not followed; it is never logged.
+    """
+    try:
+        base_url = crm_base_url()
+        with make_http_client(base_url) as client:
+            response = client.get(ME_PATH, headers={"Authorization": f"Bearer {token}"})
+    except CRMConfigError:
+        logger.warning("Login check: CRM_API_URL is not usable")
+        return _failure(503, "unavailable", UNAVAILABLE_MESSAGE)
+    except httpx.HTTPError as error:
+        logger.warning("Login check failed: %s", type(error).__name__)
+        return _failure(503, "unavailable", UNAVAILABLE_MESSAGE)
+
+    code = response.status_code
+    logger.info("Login check answer: HTTP %s", code)
+    if code == 401:
+        return _failure(401, "unauthorized", "Your login is no longer valid. Please log in again.")
+    if code == 403:
+        return _failure(403, "forbidden", "The CRM refused this request (permission).")
+    if code != 200:
+        return _failure(503, "unavailable", UNAVAILABLE_MESSAGE)
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if not _is_user(data):
+        logger.warning("Login check: unexpected 200 body from the CRM")
+        return _failure(503, "unavailable", UNAVAILABLE_MESSAGE)
+    return BridgeResult(200, {"status": "valid"})
+
+
+def _is_user(data) -> bool:
+    """The fields of the CRM's UserOut that a real login always has."""
+    def is_id(value):
+        return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+    return (isinstance(data, dict) and is_id(data.get("id")) and is_id(data.get("organization_id"))
+            and isinstance(data.get("username"), str) and bool(data["username"])
+            and data.get("is_active") is True)
 
 
 def confirm_proposal(token: str, proposal_id: str, payload_hash: str, fields: dict | None = None) -> BridgeResult:

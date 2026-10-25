@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from app import generation
 from app.main import app
-from tests.conftest import REAL_MAKE_ANTHROPIC_CLIENT, FakeMessage
+from tests.conftest import REAL_MAKE_ANTHROPIC_CLIENT, TEST_AUTH, FakeMessage
 
 PASSAGES = [
     {"filename": "donations.md", "heading": "Accepting a cash donation", "text": "Count the cash with a second volunteer.", "score": 0.5},
@@ -239,9 +239,16 @@ def client():
         yield c
 
 
+@pytest.fixture(autouse=True)
+def _logged_in_for_chat(request):
+    # Only the /chat tests below need the fake CRM's login check.
+    if "client" in request.fixturenames:
+        request.getfixturevalue("logged_in")
+
+
 def test_chat_with_claude_answer(client, sample_knowledge, fake_anthropic):
     fake_anthropic.reply = FakeMessage("Count it with a second volunteer and lock it in the office box [1].")
-    data = client.post("/chat", json={"message": "How do I deal with money a supporter gives me?"}).json()
+    data = client.post("/chat", headers=TEST_AUTH, json={"message": "How do I deal with money a supporter gives me?"}).json()
     assert data["generation"]["status"] == "answered"
     assert data["generation"]["provider"] == "Claude"
     assert data["reply"].startswith("AI-generated answer (Claude, claude-haiku-4-5-20251001) - based only on the passages below:")
@@ -250,7 +257,7 @@ def test_chat_with_claude_answer(client, sample_knowledge, fake_anthropic):
 
 def test_chat_with_claude_insufficient_sources(client, sample_knowledge, fake_anthropic):
     fake_anthropic.reply = FakeMessage("INSUFFICIENT_SOURCES")
-    data = client.post("/chat", json={"message": "How do I reset the office alarm?"}).json()
+    data = client.post("/chat", headers=TEST_AUTH, json={"message": "How do I reset the office alarm?"}).json()
     assert data["reply"].startswith(
         "No answer: Claude (claude-haiku-4-5-20251001) found that the passages below don't answer this question."
     )
@@ -258,7 +265,7 @@ def test_chat_with_claude_insufficient_sources(client, sample_knowledge, fake_an
 
 def test_chat_with_claude_over_limit(client, sample_knowledge, fake_anthropic):
     fake_anthropic.counted_tokens = 5000
-    data = client.post("/chat", json={"message": "How do I deal with money a supporter gives me?"}).json()
+    data = client.post("/chat", headers=TEST_AUTH, json={"message": "How do I deal with money a supporter gives me?"}).json()
     assert fake_anthropic.creates == []
     assert data["reply"].startswith(
         "No AI-written answer: answer generation failed (Input is 5000 tokens, over the 2000-token limit - not sent)."

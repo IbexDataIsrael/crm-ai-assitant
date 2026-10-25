@@ -1,0 +1,96 @@
+# Server profile: the assistant as a standalone, private service.
+#   docker compose -f docker-compose.server.yml up -d --build
+# Local development keeps using docker-compose.yml (bind mount, --reload, 8011).
+# Steps: DEPLOY.md.
+#
+# Design choices (owner may change them):
+# - Project name "crm-assistant-server": its own containers, network
+#   (crm-assistant-server_assistant) and database volume
+#   (crm-assistant-server_pgdata), separate from the dev project "crm-assitant".
+# - Loopback port 8020 (dev uses 8011, so both can run on one machine). Reached
+#   only through an SSH tunnel; nothing listens on a public address.
+#
+# Secrets: every ${...} below is read from .env next to this file (or the file
+# given with --env-file), written by scripts/set-db-passwords.sh. Each
+# container gets only the variables listed for it - the app never sees the
+# admin password, the database never sees the AI keys.
+
+name: crm-assistant-server
+
+services:
+  app:
+    build: .
+    image: crm-assistant-server-app
+    # Same image as development, without the source bind mount and --reload.
+    # --no-proxy-headers: uvicorn must not take the client address from
+    # X-Forwarded-For itself; app/rate_limit.py does that, for TRUSTED_PROXIES only.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8020:8000"
+    environment:
+      DB_HOST: db
+      APP_DB_NAME: crm_assistant
+      APP_DB_USER: crm_app
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?missing - run scripts/set-db-passwords.sh first}
+      # Required, no default: the CRM address is chosen at deploy time.
+      CRM_API_URL: ${CRM_API_URL:?missing - set CRM_API_URL in .env (see DEPLOY.md)}
+      # Optional; empty means "not set" (the app then uses its defaults).
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      ANSWER_PROVIDER: ${ANSWER_PROVIDER:-}
+      # The reverse proxy's address(es) as seen from this container (IPs or
+      # CIDR), whose X-Forwarded-For is believed for rate limiting. Empty = no
+      # proxy trusted: every request counts under its TCP peer (see DEPLOY.md).
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      # API_DOCS is deliberately not passed: /docs and /openapi.json stay off.
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).status != 200)"]
+      interval: 30s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    networks:
+      - assistant
+
+  db:
+    image: pgvector/pgvector:0.8.2-pg18@sha256:42e7f6b4e1eceb02ff14e3e6bc6108bbe259abbe83879dc1845d0da1ddeb555d
+    command: ["postgres", "-c", "hba_file=/etc/postgresql/pg_hba.conf", "-c", "ident_file=/etc/postgresql/pg_ident.conf"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crm_assistant
+      POSTGRES_DB: crm_assistant
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+      # Used only when the volume is empty (first boot): the admin password,
+      # and the app/test passwords that scripts/db/init/10-roles.sh sets.
+      # Missing -> compose refuses to start, so a fresh volume never opens up.
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:?missing - run scripts/set-db-passwords.sh first}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?missing - run scripts/set-db-passwords.sh first}
+      TEST_DB_PASSWORD: ${TEST_DB_PASSWORD:?missing - run scripts/set-db-passwords.sh first}
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./scripts/db/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - ./scripts/db/pg_ident.conf:/etc/postgresql/pg_ident.conf:ro
+      - ./scripts/db/setup-roles.sql:/etc/postgresql/sql/setup-roles.sql:ro
+      - ./scripts/db/set-passwords.sql:/etc/postgresql/sql/set-passwords.sql:ro
+      - ./scripts/db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_assistant -d crm_assistant"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    # No "ports:": reachable only from the app on this compose network.
+    networks:
+      - assistant
+
+networks:
+  assistant:
+
+volumes:
+  # Never deleted by "docker compose down"; only "down -v" or "docker volume rm".
+  pgdata:

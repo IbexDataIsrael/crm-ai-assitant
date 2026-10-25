@@ -324,7 +324,8 @@
     async function sendTurn(message) {
       const sentWith = token;
       const headers = { "Content-Type": "application/json" };
-      if (intent === "create_contact") headers["Authorization"] = "Bearer " + token;
+      // Every intent needs the login now: the server checks it with the CRM first.
+      headers["Authorization"] = "Bearer " + token;
       const body = { intent, message, language };
       if (intent === "create_contact" && conversation) body.state = conversation;
       try {
@@ -333,6 +334,12 @@
         if (res.status === 401) {
           const data = await res.json().catch(() => ({}));
           logout(data.reply || "Your CRM login is no longer valid. Please log in again.");
+          return;
+        }
+        if ([400, 403, 429, 503].includes(res.status)) {
+          // Not a login problem: show the server's message and keep the session.
+          const data = await res.json().catch(() => ({}));
+          addRequestError(data.reply || ("The server returned HTTP " + res.status + "."));
           return;
         }
         if (!res.ok) {

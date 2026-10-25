@@ -4,9 +4,10 @@ and they use their own database and login role, never the app's."""
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 
-from app import crm_api, generation, knowledge
+from app import crm_api, generation, knowledge, rate_limit
 from app.embeddings import get_embedder
 from app.vectorstore import VectorStore, database_dsn
 
@@ -52,6 +53,14 @@ def sample_knowledge(monkeypatch, sample_store):
 REAL_MAKE_CLIENT = generation.make_client
 REAL_MAKE_ANTHROPIC_CLIENT = generation.make_anthropic_client
 REAL_MAKE_CRM_CLIENT = crm_api.make_http_client
+
+
+@pytest.fixture(autouse=True)
+def fresh_rate_limits():
+    """Each test starts with empty request counts (all tests share one client address)."""
+    rate_limit.limiter.reset()
+    yield
+    rate_limit.limiter.reset()
 
 
 @pytest.fixture(autouse=True)
@@ -166,14 +175,34 @@ def fake_anthropic(monkeypatch):
     return fake
 
 
+# A user as the CRM's GET /api/auth/me returns it (UserOut, the fields checked).
+CRM_ME = {"id": 7, "guid": "u-7", "username": "dana", "full_name": "Dana Levi", "role": "staff",
+          "is_active": True, "organization_id": 3, "created_at": "2026-01-01T00:00:00"}
+
+
 class FakeCRM:
-    """A mock CRM: answers each request with the next item (an httpx.Response, or an exception to raise)."""
+    """A mock CRM: answers each request with the next item (an httpx.Response, or an exception to raise).
+
+    The login check (GET /api/auth/me) is answered separately: from me_answers
+    if a test queued any, otherwise with a valid user. Those calls are recorded
+    in me_requests, so `requests` keeps only the bridge and login calls.
+    """
 
     def __init__(self):
         self.answers = []
         self.requests = []
+        self.me_answers = []
+        self.me_requests = []
 
     def handler(self, request):
+        if request.url.path == crm_api.ME_PATH:
+            self.me_requests.append(request)
+            if not self.me_answers:
+                return httpx.Response(200, json=CRM_ME)
+            answer = self.me_answers.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
         self.requests.append(request)
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
@@ -186,11 +215,20 @@ class FakeCRM:
 
 @pytest.fixture
 def fake_crm(monkeypatch):
-    """Set CRM_API_URL and route every CRM call (bridge and login) to a FakeCRM."""
-    import httpx
-
+    """Set CRM_API_URL and route every CRM call (bridge, login, login check) to a FakeCRM."""
     monkeypatch.setenv("CRM_API_URL", "http://crm.test:8001/")
     fake = FakeCRM()
     monkeypatch.setattr(crm_api, "make_http_client", lambda base_url: httpx.Client(
         base_url=base_url, transport=httpx.MockTransport(fake.handler), follow_redirects=False))
     return fake
+
+
+# A token the fake CRM accepts at GET /api/auth/me (the value itself is never checked here).
+TEST_TOKEN = "eyJhbGciOiJIUzI1NiJ9.test-user-secret.sig"
+TEST_AUTH = {"Authorization": f"Bearer {TEST_TOKEN}"}
+
+
+@pytest.fixture
+def logged_in(fake_crm):
+    """The chat routes need a login the CRM confirms: the fake CRM confirms TEST_TOKEN."""
+    return TEST_AUTH
