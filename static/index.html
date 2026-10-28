@@ -37,12 +37,15 @@
     .choices { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
     .soon { font-size: 14px; font-weight: bold; color: #555; background: #eee; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
     .live { color: #8a4b00; font-weight: bold; }
+    .multi { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+    .multi label { display: flex; gap: 8px; align-items: center; font-size: 18px; }
   </style>
 </head>
 <body>
   <h1>CRM Assistant</h1>
   <p class="demo">Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. Typed "find" / "update" commands still return demo data.</p>
-  <p class="live">Create a contact talks to the real CRM at CRM_API_URL: a draft you confirm with "yes" is saved there as a real record.</p>
+  <p class="live">Create a contact talks to the real CRM at CRM_API_URL: a draft you confirm with "yes" is saved there as a real record.
+    Edit an apartment also talks to the real CRM: the value you pick is saved there right away.</p>
 
   <section id="login-panel" class="panel">
     <form id="login-form">
@@ -170,6 +173,10 @@
     let token = null;
     let intent = null;        // set by the menu, never from free text
     let conversation = null;  // create_contact state, as the server returned it
+    let apartmentState = null;  // edit_apartment state, as the server returned it
+    // One turn at a time: while a request is in flight, sending and every
+    // choice button are off, so one tap can never send an update twice.
+    let busy = false;
     const language = (navigator.language || "en").toLowerCase().startsWith("he") ? "he" : "en";
 
     const LOGIN_ERRORS = {
@@ -198,6 +205,12 @@
     function clearConversation() {
       intent = null;
       conversation = null;
+      apartmentState = null;
+    }
+
+    function setBusy(value) {
+      busy = value;
+      chatForm.querySelectorAll("input, button").forEach(n => { n.disabled = value; });
     }
 
     function logout(reason) {
@@ -287,13 +300,17 @@
       const ask = el("button", null, "Ask a question / שאלה");
       ask.type = "button";
       ask.addEventListener("click", () => choose("ask_question", ask.textContent));
-      choices.append(create, update, ask);
+      const apartment = el("button", null, "Edit an apartment / עריכת דירה");
+      apartment.type = "button";
+      apartment.addEventListener("click", () => choose("edit_apartment", apartment.textContent));
+      choices.append(create, update, apartment, ask);
       div.appendChild(choices);
       log.appendChild(div);
       div.scrollIntoView();
     }
 
     function choose(newIntent, label) {
+      if (busy) return;
       clearConversation();
       intent = newIntent;
       addUser(label);
@@ -321,13 +338,83 @@
       div.scrollIntoView();
     }
 
+    // A tap on a button sends its message as a turn (ignored while busy).
+    function tap(label, message) {
+      if (busy) return;
+      addUser(label);
+      sendTurn(message);
+    }
+
+    function addApartmentReply(data) {
+      // Earlier steps' buttons no longer apply: a stale pick must never be sent.
+      log.querySelectorAll(".apt-choices button, .apt-choices input").forEach(n => { n.disabled = true; });
+      const div = el("div", "msg bot");
+      div.appendChild(el("div", "text", data.reply));
+      const he = data.state && data.state.language === "he";
+      const choices = data.choices || [];
+      if (data.multi && choices.length) {
+        const box = el("div", "multi apt-choices");
+        const boxes = choices.map(c => {
+          const label = el("label");
+          const check = document.createElement("input");
+          check.type = "checkbox";
+          check.value = c.message;
+          label.append(check, document.createTextNode(c.label));
+          box.appendChild(label);
+          return check;
+        });
+        const save = el("button", null, he ? "שמירה" : "Save");
+        save.type = "button";
+        save.addEventListener("click", () => {
+          const picked = boxes.filter(b => b.checked).map(b => b.value);
+          const message = picked.length ? picked.join(",") : (he ? "ללא" : "none");
+          const labels = boxes.filter(b => b.checked).map(b => b.parentNode.textContent);
+          tap(labels.length ? labels.join(", ") : message, message);
+        });
+        box.appendChild(save);
+        div.appendChild(box);
+      } else if (choices.length) {
+        const row = el("div", "choices apt-choices");
+        choices.forEach(c => {
+          const b = el("button", null, c.label);
+          b.type = "button";
+          b.addEventListener("click", () => tap(c.label, c.message));
+          row.appendChild(b);
+        });
+        div.appendChild(row);
+      }
+      if (data.awaiting_check) {
+        const row = el("div", "choices apt-choices");
+        [he ? "כן" : "yes", he ? "לא" : "no"].forEach(word => {
+          const b = el("button", null, word);
+          b.type = "button";
+          b.addEventListener("click", () => tap(word, word));
+          row.appendChild(b);
+        });
+        div.appendChild(row);
+      }
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
     async function sendTurn(message) {
+      if (busy) return;
+      setBusy(true);
+      try {
+        await sendTurnNow(message);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function sendTurnNow(message) {
       const sentWith = token;
       const headers = { "Content-Type": "application/json" };
       // Every intent needs the login now: the server checks it with the CRM first.
       headers["Authorization"] = "Bearer " + token;
       const body = { intent, message, language };
       if (intent === "create_contact" && conversation) body.state = conversation;
+      if (intent === "edit_apartment" && apartmentState) body.apartment_state = apartmentState;
       try {
         const res = await fetch("/assistant/turn", { method: "POST", headers, body: JSON.stringify(body) });
         if (token !== sentWith) return;  // logged out or another login meanwhile: drop the answer
@@ -349,6 +436,10 @@
         const data = await res.json();
         if (data.intent === "ask_question" && data.outcome === "answered") {
           addBot(data);
+        } else if (data.intent === "edit_apartment") {
+          apartmentState = data.state;
+          addApartmentReply(data);
+          if (data.logout) logout(data.reply);
         } else if (data.intent === "create_contact") {
           conversation = data.state;
           addConversationReply(data);
@@ -368,7 +459,7 @@
     chatForm.addEventListener("submit", (e) => {
       e.preventDefault();
       const message = input.value.trim();
-      if (!message) return;
+      if (!message || busy) return;
       addUser(message);
       input.value = "";
       if (!intent) {

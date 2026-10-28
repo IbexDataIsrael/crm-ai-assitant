@@ -14,7 +14,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import contact_chat, crm, crm_api, generation, knowledge, planner, rate_limit
+from app import apartment_chat, contact_chat, crm, crm_api, generation, knowledge, planner, rate_limit
+from app.apartment_chat import ApartmentEditState
 from app.contact_chat import ContactDraftFields, ConversationState
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -336,11 +337,13 @@ class TurnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Set by the menu choice, never read from free text.
-    intent: Literal["create_contact", "update_contact", "ask_question"]
+    intent: Literal["create_contact", "update_contact", "edit_apartment", "ask_question"]
     # Empty when the menu choice was just made.
     message: str = ""
     # Held by the page between turns (create_contact only). Contains no token.
     state: Optional[ConversationState] = None
+    # Held by the page between turns (edit_apartment only). Contains no token.
+    apartment_state: Optional[ApartmentEditState] = None
     language: Optional[Literal["en", "he"]] = None
 
 
@@ -352,7 +355,8 @@ def assistant_turn(
 ):
     """One step of the conversation. Every intent needs a login the CRM confirms
     first; the token then goes only to the CRM (login check and bridge)."""
-    language = request.language or (request.state.language if request.state else "en")
+    held = request.apartment_state or request.state
+    language = request.language or (held.language if held else "en")
     token, refusal = _require_login(http_request, credentials, language, intent=request.intent)
     if refusal is not None:
         return refusal
@@ -367,8 +371,14 @@ def assistant_turn(
             return {"intent": "ask_question", "outcome": "ask", "reply": ASK_A_QUESTION[language]}
         return {"intent": "ask_question", "outcome": "answered", **answer_message(request.message)}
 
-    # create_contact. (A future apartment-edit flow - propose, confirm, save -
-    # goes here too, behind the same check above.)
+    if request.intent == "edit_apartment":
+        # sheepsidebay_crm docs/fixes114.md: behind the same login check above.
+        if not request.message.strip():
+            return apartment_chat.start(language)
+        state = request.apartment_state or ApartmentEditState(language=language)
+        return apartment_chat.handle_turn(token, request.message, state)
+
+    # create_contact.
     if not request.message.strip():
         return contact_chat.start(language)
     state = request.state or ConversationState(language=language)

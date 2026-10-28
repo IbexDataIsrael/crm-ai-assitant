@@ -358,3 +358,144 @@ def confirm_proposal(token: str, proposal_id: str, payload_hash: str, fields: di
         })
     # A 2xx we cannot read: the CRM may have saved, so do not claim either way.
     return _failure(502, "uncertain", uncertain_message, **retry)
+
+
+# --- Apartment edit (docs: sheepsidebay_crm docs/fixes114.md) -----------------
+# The CRM's GET /api/assistant/apartments/fields, /search, /by-lineage/{id} and
+# POST /{id}/update (backend/app/routers/assistant_apartments.py). Same rules as
+# the contact bridge: the user's token only, to CRM_API_URL only, no redirects.
+# Reads are safe to repeat. An update whose answer is lost is "uncertain" and
+# is NEVER resent by this module: the caller re-reads the lineage instead.
+
+APARTMENTS_PATH = "/api/assistant/apartments"
+
+
+def _get(path: str, token: str, params: dict | None = None) -> httpx.Response:
+    base_url = crm_base_url()
+    with make_http_client(base_url) as client:
+        return client.get(path, params=params, headers={"Authorization": f"Bearer {token}"})
+
+
+def _is_id(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_apartment(data) -> bool:
+    """The fields of a CRM apartment summary that the chat relies on."""
+    return (isinstance(data, dict) and _is_id(data.get("apartment_id")) and _is_id(data.get("lineage_id"))
+            and isinstance(data.get("language"), list))
+
+
+def _read(path: str, token: str, params: dict | None = None) -> tuple[BridgeResult | None, object]:
+    """(failure, None) or (None, the decoded 200 body). A read never changes anything."""
+    try:
+        response = _get(path, token, params)
+    except CRMConfigError as error:
+        return _failure(503, "crm_not_configured", str(error)), None
+    except httpx.TimeoutException:
+        logger.warning("CRM apartment read timed out")
+        return _failure(504, "crm_timeout", "The CRM did not answer in time. Nothing was changed."), None
+    except httpx.HTTPError as error:
+        logger.warning("CRM apartment read failed: %s", type(error).__name__)
+        return _failure(502, "crm_unreachable", "Could not reach the CRM. Nothing was changed."), None
+    code = response.status_code
+    logger.info("CRM apartment read answer: HTTP %s", code)
+    failure = _common_failure(response)
+    if failure:
+        return failure, None
+    if code == 404:
+        return _failure(404, "not_found", "No such apartment for this user."), None
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if code != 200 or data is None:
+        return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {code})."), None
+    return None, data
+
+
+def _is_option(option) -> bool:
+    return isinstance(option, dict) and all(isinstance(option.get(k), str) for k in ("value", "label_he", "label_en"))
+
+
+def apartment_fields(token: str) -> BridgeResult:
+    """The fields this user may edit, each with its options (admin-controlled in the CRM)."""
+    failure, data = _read(f"{APARTMENTS_PATH}/fields", token)
+    if failure:
+        return failure
+    fields = data.get("fields") if isinstance(data, dict) else None
+    if not isinstance(fields, list) or not all(
+        isinstance(f, dict) and isinstance(f.get("field"), str) and f.get("type") in ("single", "multi")
+        and isinstance(f.get("options"), list) and all(_is_option(o) for o in f["options"])
+        for f in fields
+    ):
+        return _failure(502, "crm_contract_error", "The CRM's field list had an unexpected shape.")
+    return BridgeResult(200, {"status": "ok", "fields": fields})
+
+
+def search_apartments(token: str, query: str) -> BridgeResult:
+    failure, data = _read(f"{APARTMENTS_PATH}/search", token, {"q": query})
+    if failure:
+        return failure
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list) or not all(_is_apartment(r) for r in results):
+        return _failure(502, "crm_contract_error", "The CRM's search answer had an unexpected shape.")
+    return BridgeResult(200, {"status": "ok", "results": results, "truncated": bool(data.get("truncated"))})
+
+
+def apartment_by_lineage(token: str, lineage_id: int) -> BridgeResult:
+    """The lineage's current version: the re-resolution read after a lost answer, 404 or 409."""
+    if not _is_id(lineage_id):
+        return _failure(404, "not_found", "No such apartment for this user.")
+    failure, data = _read(f"{APARTMENTS_PATH}/by-lineage/{lineage_id}", token)
+    if failure:
+        return failure
+    if not _is_apartment(data):
+        return _failure(502, "crm_contract_error", "The CRM's apartment answer had an unexpected shape.")
+    return BridgeResult(200, {"status": "ok", "apartment": data})
+
+
+def update_apartment_field(token: str, apartment_id: int, field: str, value) -> BridgeResult:
+    """One field of one apartment version. "updated"/"unchanged" come only from the
+    CRM's success answer, with the state the CRM read back after saving."""
+    if not _is_id(apartment_id):
+        return _failure(404, "not_found", "No such apartment for this user.")
+    uncertain_message = ("The CRM's answer was lost, so it is not known whether the change was saved. "
+                         "It was not resent; read the apartment again to find out.")
+    try:
+        response = _send(f"{APARTMENTS_PATH}/{apartment_id}/update", token, {"field": field, "value": value})
+    except CRMConfigError as error:
+        return _failure(503, "crm_not_configured", str(error))
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        logger.warning("CRM apartment update: could not connect")
+        return _failure(502, "crm_unreachable", "Could not reach the CRM; the change was not sent.")
+    except httpx.HTTPError as error:
+        logger.warning("CRM apartment update: outcome uncertain (%s)", type(error).__name__)
+        return _failure(504, "uncertain", uncertain_message)
+
+    code = response.status_code
+    logger.info("CRM apartment update answer: HTTP %s", code)
+    failure = _common_failure(response)
+    if failure:
+        return failure
+    if code >= 500:
+        return _failure(502, "uncertain", uncertain_message)
+    if code == 404:
+        return _failure(404, "not_found", "No such apartment for this user.")
+    if code == 409:
+        return _failure(409, "stale", "The apartment was changed meanwhile; nothing was saved.")
+    try:
+        data = response.json()
+    except ValueError:
+        data = None
+    if (code == 200 and isinstance(data, dict) and data.get("status") in ("updated", "unchanged")
+            and _is_apartment(data.get("apartment"))):
+        return BridgeResult(200, {
+            "status": data["status"],
+            "apartment_id": data.get("apartment_id"),
+            "previous_apartment_id": data.get("previous_apartment_id"),
+            "lineage_id": data.get("lineage_id"),
+            "apartment": data["apartment"],
+        })
+    # A 2xx we cannot read: the CRM may have saved, so do not claim either way.
+    return _failure(502, "uncertain", uncertain_message)

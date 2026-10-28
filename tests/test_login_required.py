@@ -71,7 +71,7 @@ def test_every_route_except_page_health_and_login_needs_a_token(client, fake_crm
     assert fake_crm.requests == [] and fake_crm.me_requests == []
 
 
-@pytest.mark.parametrize("intent", ["create_contact", "update_contact", "ask_question"])
+@pytest.mark.parametrize("intent", ["create_contact", "update_contact", "edit_apartment", "ask_question"])
 def test_every_turn_intent_needs_a_token(client, fake_crm, fake_gemini, no_search, intent):
     response = turn(client, intent, headers={})
     assert response.status_code == 401
