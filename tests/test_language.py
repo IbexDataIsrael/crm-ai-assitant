@@ -447,3 +447,34 @@ def test_privacy_only_the_two_letter_value_goes_to_the_crm(client, fake_crm, sea
     assert [json.loads(r.content) for r in fake_crm.pref_requests] == [{"key": "locale", "value": "he"}]
     assert message not in json.dumps(data["language_state"], ensure_ascii=False)
     assert message not in caplog.text
+
+
+# --- a reopened page with a remembered login (POST /auth/session) --------------------
+
+@pytest.mark.parametrize("preferences, expected", [
+    (httpx.Response(200, json={"locale": "he", "theme": "dark"}), "he"),
+    (httpx.Response(200, json={}), None),
+    (httpx.Response(500, json={}), None),
+])
+def test_a_remembered_login_is_checked_and_the_language_read_again(client, fake_crm, preferences, expected):
+    fake_crm.pref_answers.append(preferences)
+    response = client.post("/auth/session", headers=TEST_AUTH)
+    assert response.status_code == 200
+    assert response.json() == {"status": "logged_in", "language": expected}
+    assert response.headers["cache-control"] == "no-store"
+    assert len(fake_crm.me_requests) == 1 and [r.method for r in fake_crm.pref_requests] == ["GET"]
+    assert "theme" not in response.text and fake_crm.requests == []
+
+
+@pytest.mark.parametrize("me_answer, status", [(httpx.Response(401, json={}), 401), (httpx.Response(500, json={}), 503)])
+def test_a_remembered_login_the_crm_refuses_is_not_resumed(client, fake_crm, me_answer, status):
+    fake_crm.me_answers.append(me_answer)
+    response = client.post("/auth/session", headers=TEST_AUTH)
+    assert response.status_code == status
+    assert response.json()["logout"] is (status == 401)
+    assert fake_crm.pref_requests == []
+
+
+def test_resuming_needs_a_token(client, fake_crm):
+    response = client.post("/auth/session")
+    assert response.status_code == 401 and fake_crm.me_requests == [] and fake_crm.pref_requests == []

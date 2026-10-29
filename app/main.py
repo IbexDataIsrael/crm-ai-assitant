@@ -333,6 +333,23 @@ async def login(request: Request):
     return JSONResponse(status_code=result.http_status, content=result.body, headers=NO_STORE)
 
 
+@app.post("/auth/session")
+async def resume_session(
+    http_request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(crm_bearer),
+):
+    """A page reopened with a remembered login: is the token still valid, and what is the
+    user's language now? Same rate limit and CRM login check as the chat; the language is
+    read from the CRM again (it may have changed elsewhere). Answers logged_in + language,
+    or the gate's refusal (401 -> the page forgets the token)."""
+    token, refusal = await run_in_threadpool(_require_login, http_request, credentials, "en")
+    if refusal is not None:
+        return refusal
+    language = await run_in_threadpool(crm_api.read_language, token)
+    return JSONResponse(status_code=200, headers=NO_STORE,
+                        content={"status": "logged_in", "language": language})
+
+
 # --- The conversation: quick-menu intent + one turn ---------------------------
 
 UPDATE_NOT_AVAILABLE = {

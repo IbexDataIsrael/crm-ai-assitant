@@ -74,16 +74,16 @@ function buildDocument() {
     return n;
   }
   add(body, "h1", { "data-t": "title" }, "CRM Assistant");
-  add(body, "button", { id: "language-toggle" }, "עברית");
+  add(body, "button", { id: "language-toggle", class: "hidden" }, "עברית");
   add(body, "p", { "data-t": "banner_demo" });
   add(body, "p", { "data-t": "banner_live" });
   const panel = add(body, "section", { id: "login-panel" });
   const form = add(panel, "form", { id: "login-form" });
-  add(form, "label", {}, "CRM username or email / שם משתמש או אימייל ב-CRM");
+  add(form, "label", {}, "CRM username or email");
   add(form, "input", { id: "username" });
-  add(form, "label", {}, "Password / סיסמה");
+  add(form, "label", {}, "Password");
   add(form, "input", { id: "password" });
-  add(form, "button", { id: "login-button" }, "Log in / התחברות");
+  add(form, "button", { id: "login-button" }, "Log in");
   const org = add(panel, "div", { id: "org-choice", class: "hidden" });
   add(org, "div", { id: "org-buttons" });
   add(panel, "div", { id: "login-error", class: "hidden" });
@@ -106,7 +106,14 @@ function buildDocument() {
 }
 
 // --- a fake server -----------------------------------------------------------------
-function makePage(browserLanguage, server) {
+// localStorage stand-in, shared between "page loads" when a test passes the same one.
+function makeStorage(initial = {}) {
+  const items = { ...initial };
+  return { items, getItem: k => (k in items ? items[k] : null), setItem: (k, v) => { items[k] = String(v); },
+           removeItem: k => { delete items[k]; } };
+}
+
+function makePage(browserLanguage, server, storage = makeStorage()) {
   const document = buildDocument();
   const calls = [];
   async function fetch(url, options) {
@@ -115,9 +122,10 @@ function makePage(browserLanguage, server) {
     const [status, data] = server(url, body, calls);
     return { status, ok: status >= 200 && status < 300, json: async () => data };
   }
-  const run = new Function("document", "navigator", "fetch", script + "\n;return { get language() { return language; }, get state() { return languageState; } };");
-  const page = run(document, { language: browserLanguage }, fetch);
-  return { document, calls, page };
+  const run = new Function("document", "navigator", "fetch", "localStorage",
+    script + "\n;return { get language() { return language; }, get state() { return languageState; }, get token() { return token; } };");
+  const page = run(document, { language: browserLanguage }, fetch, storage);
+  return { document, calls, page, storage };
 }
 
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0)); };
@@ -138,31 +146,66 @@ function turnAnswer(languageState, reply, extra = {}) {
 }
 
 (async () => {
-  // 1. Hebrew browser, before login: the page is Hebrew/rtl, the login form bilingual; a toggle press switches at once.
+  // 1. Before login the page is English only, whatever the browser; no toggle; the CRM's language after login.
   {
-    let saved = [];
-    const { document, calls, page } = makePage("he-IL", (url, body) => {
+    const { document, calls, page, storage } = makePage("he-IL", (url, body) => {
       if (url === "/auth/login") return [200, { status: "logged_in", access_token: "tok", language: "he" }];
-      if (url === "/assistant/language") { saved.push(body.language); return [200, { status: "saved", language: body.language }]; }
       return turnAnswer(body.language_state, "x");
     });
     const root = document.documentElement;
-    check("before login: browser Hebrew -> html lang he, dir rtl", root.lang === "he" && root.dir === "rtl");
-    check("before login: toggle shows the other language (English)", $(document, "language-toggle").textContent === "English");
-    check("before login: banner from the Hebrew dictionary", document.querySelectorAll("[data-t]")[1].textContent.includes("שאלה"));
-    const form = $(document, "login-form").textContent;
-    check("login screen stays bilingual", form.includes("Password") && form.includes("סיסמה") && form.includes("Log in") && form.includes("התחברות"));
+    check("before login: Hebrew browser -> still English, ltr", root.lang === "en" && root.dir === "ltr" && page.language === "en");
+    check("before login: no toggle", $(document, "language-toggle").classList.contains("hidden"));
     $(document, "language-toggle").click();
-    check("toggle before login: lang en, dir ltr at once", root.lang === "en" && root.dir === "ltr" && page.language === "en");
-    check("toggle before login: label now עברית", $(document, "language-toggle").textContent === "עברית");
-    check("toggle before login: nothing sent yet", calls.length === 0);
+    check("before login: a hidden toggle press changes nothing", page.language === "en" && calls.length === 0);
+    const all = root.textContent;
+    check("before login: no Hebrew anywhere on the page", !/[\u0590-\u05FF]/.test(all.replace("עברית", "")));
+    check("before login: no remembered login -> no session check", !calls.some(c => c.url === "/auth/session"));
     loginWith(document);
     await settle();
-    check("choice made before login wins over the CRM value (he)", page.language === "en" && root.lang === "en");
-    check("choice made before login is saved after it, once", JSON.stringify(saved) === '["en"]');
-    check("save carries the token", calls.find(c => c.url === "/assistant/language").auth === "Bearer tok");
-    check("after the save: state saved=en, toggled=true", page.state.saved === "en" && page.state.toggled === true);
-    check("menu in English", !!button(document, "Ask a question") && !button(document, "שאלה"));
+    check("after login: the CRM's language (he), rtl", page.language === "he" && root.lang === "he" && root.dir === "rtl");
+    check("after login: toggle shown, labelled English", !$(document, "language-toggle").classList.contains("hidden")
+      && $(document, "language-toggle").textContent === "English");
+    check("after login: nothing saved (the CRM already has it)", !calls.some(c => c.url === "/assistant/language"));
+    check("after login: the login is remembered", JSON.parse(storage.getItem("crm-assistant.login")).token === "tok");
+    check("after login: no English menu", !!button(document, "שאלה") && !button(document, "Ask a question"));
+    $(document, "logout").click();
+    check("log out: forgotten, back to English, toggle hidden", storage.getItem("crm-assistant.login") === null
+      && page.language === "en" && root.dir === "ltr" && $(document, "language-toggle").classList.contains("hidden"));
+  }
+
+  // 1b. A reopened page with a remembered login: checked by the server, language read again.
+  {
+    const storage = makeStorage({ "crm-assistant.login": JSON.stringify({ token: "kept", since: Date.now() - 86400000 }) });
+    const { document, calls, page } = makePage("en-US", (url) => {
+      if (url === "/auth/session") return [200, { status: "logged_in", language: "he" }];
+      return [500, {}];
+    }, storage);
+    await settle();
+    const check1 = calls.find(c => c.url === "/auth/session");
+    check("reopen: the remembered token is checked with the server", check1 && check1.auth === "Bearer kept");
+    check("reopen: logged in, in the CRM's language", page.token === "kept" && page.language === "he"
+      && document.documentElement.dir === "rtl");
+  }
+  {
+    const storage = makeStorage({ "crm-assistant.login": JSON.stringify({ token: "old", since: Date.now() - 86400000 }) });
+    const { page } = makePage("en-US", () => [401, { status: "unauthorized" }], storage);
+    await settle();
+    check("reopen: a token the CRM refuses is forgotten", page.token === null && storage.getItem("crm-assistant.login") === null);
+  }
+  {
+    const storage = makeStorage({ "crm-assistant.login": JSON.stringify({ token: "ancient", since: Date.now() - 31 * 86400000 }) });
+    const { calls, page } = makePage("en-US", () => [200, { status: "logged_in", language: "en" }], storage);
+    await settle();
+    check("reopen: after 30 days the login is forgotten without asking", calls.length === 0 && page.token === null
+      && storage.getItem("crm-assistant.login") === null);
+  }
+  {
+    const storage = makeStorage({ "crm-assistant.login": JSON.stringify({ token: "kept", since: Date.now() }) });
+    const { document, page } = makePage("en-US", () => [503, { status: "unavailable", reply: "The service is temporarily unavailable." }], storage);
+    await settle();
+    check("reopen: an outage keeps the token, shows the login screen with the reason",
+      page.token === null && storage.getItem("crm-assistant.login") !== null
+      && $(document, "login-error").textContent === "The service is temporarily unavailable.");
   }
 
   // 2. English browser, the CRM says he: the CRM value wins, nothing is saved.
@@ -199,7 +242,7 @@ function turnAnswer(languageState, reply, extra = {}) {
     });
     loginWith(document);
     await settle();
-    check("no CRM value -> browser language en, nothing saved", page.language === "en" && !calls.some(c => c.url === "/assistant/language"));
+    check("no CRM value -> English, nothing saved", page.language === "en" && !calls.some(c => c.url === "/assistant/language"));
     check("state saved=null", page.state.saved === null);
     button(document, "Ask a question").click();
     await settle();
@@ -251,13 +294,26 @@ function turnAnswer(languageState, reply, extra = {}) {
     check("toggle to the saved value: no call", saves().length === 3);
   }
 
-  // 5. Login errors in the page's language, not both at once.
+  // 5. Login errors in English only (the login screen is English), even with a Hebrew browser.
   {
     const { document } = makePage("he-IL", () => [401, { status: "invalid_credentials" }]);
     loginWith(document);
     await settle();
-    const text = $(document, "login-error").textContent;
-    check("login error in Hebrew only", text === "שם משתמש או סיסמה שגויים.");
+    check("login error in English only", $(document, "login-error").textContent === "Incorrect username or password.");
+  }
+
+  // 6. A Hebrew session whose login ends: the login screen says so in English.
+  {
+    const { document, page } = makePage("en-US", (url) => {
+      if (url === "/auth/login") return [200, { status: "logged_in", access_token: "tok", language: "he" }];
+      return [401, { status: "unauthorized", reply: "אנא התחברו.", logout: true }];
+    });
+    loginWith(document);
+    await settle();
+    button(document, "שאלה").click();
+    await settle();
+    check("ended login: English login screen, English reason", page.token === null && page.language === "en"
+      && $(document, "login-error").textContent === "Your CRM login is no longer valid. Please log in again.");
   }
 
   let failed = 0;

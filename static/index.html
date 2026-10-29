@@ -50,23 +50,23 @@
 <body>
   <div class="top">
     <h1 data-t="title">CRM Assistant</h1>
-    <!-- Shows the OTHER language's name; a press switches at once (docs/instructions19.md). -->
-    <button type="button" id="language-toggle">עברית</button>
+    <!-- After login only. Shows the OTHER language's name; a press switches at once (docs/instructions19.md). -->
+    <button type="button" id="language-toggle" class="hidden">עברית</button>
   </div>
   <p class="demo" data-t="banner_demo"></p>
   <p class="live" data-t="banner_live"></p>
 
   <section id="login-panel" class="panel">
-    <!-- Before login the user's language is unknown: the login form stays bilingual. -->
+    <!-- Before login the page is English only; after login it takes the user's language from the CRM. -->
     <form id="login-form">
-      <label for="username">CRM username or email / שם משתמש או אימייל ב-CRM</label>
+      <label for="username">CRM username or email</label>
       <input id="username" autocomplete="username" required>
-      <label for="password">Password / סיסמה</label>
+      <label for="password">Password</label>
       <input id="password" type="password" autocomplete="current-password" required>
-      <button type="submit" id="login-button">Log in / התחברות</button>
+      <button type="submit" id="login-button">Log in</button>
     </form>
     <div id="org-choice" class="hidden">
-      <p>This login belongs to several organizations. Choose one: / ההתחברות הזו שייכת לכמה ארגונים. בחרו אחד:</p>
+      <p>This login belongs to several organizations. Choose one:</p>
       <div id="org-buttons" class="choices"></div>
     </div>
     <div id="login-error" class="section error hidden"></div>
@@ -201,13 +201,11 @@
       },
     };
 
-    // Before login: the browser's language, a passive fallback that is never saved.
-    let language = (navigator.language || "en").toLowerCase().startsWith("he") ? "he" : "en";
+    // Before login: English only. After login: the CRM's value (English when it has none).
+    let language = "en";
     // After login: the session's language state, as app/language.py defines it
     // (language, toggled, streak, saved, retry). Sent with every turn; no token in it.
     let languageState = null;
-    // A toggle press on the login screen: applied at once, saved after login.
-    let chosenBeforeLogin = null;
 
     function t(key, values) {
       let text = TEXT[language][key];
@@ -334,10 +332,30 @@
     }
 
     // --- Login, menu and the conversation -----------------------------------
-    // The CRM token lives only in this variable: never in localStorage,
-    // sessionStorage or cookies. Logging out, a new login or any 401 drops it
-    // together with the conversation state (fields and pending proposal).
+    // The CRM token is remembered in localStorage, like the CRM's own site does, so a reload
+    // or a new tab stays logged in. It lasts as long as the CRM accepts it (the CRM checks it
+    // on every turn) and at most 30 days here. Logging out or any 401 forgets it, together
+    // with the conversation state (fields and pending proposal), which is never stored.
+    const TOKEN_KEY = "crm-assistant.login";
+    const REMEMBER_MS = 30 * 24 * 60 * 60 * 1000;
     let token = null;
+
+    function rememberLogin(value) {
+      try { localStorage.setItem(TOKEN_KEY, JSON.stringify({ token: value, since: Date.now() })); } catch (e) {}
+    }
+
+    function forgetLogin() {
+      try { localStorage.removeItem(TOKEN_KEY); } catch (e) {}
+    }
+
+    function rememberedLogin() {
+      try {
+        const kept = JSON.parse(localStorage.getItem(TOKEN_KEY) || "null");
+        if (kept && typeof kept.token === "string" && Date.now() - kept.since < REMEMBER_MS) return kept.token;
+      } catch (e) {}
+      forgetLogin();
+      return null;
+    }
     let intent = null;        // set by the menu, never from free text
     let conversation = null;  // create_contact state, as the server returned it
     let apartmentState = null;  // edit_apartment state, as the server returned it
@@ -368,10 +386,13 @@
 
     function logout(reason) {
       token = null;
+      forgetLogin();
       clearConversation();
-      // The next login reads the CRM's value again; the page keeps showing the current language until then.
+      // The login screen is English only; the next login reads the CRM's value again.
       languageState = null;
-      chosenBeforeLogin = null;
+      language = "en";
+      applyLanguage();
+      show(document.getElementById("language-toggle"), false);
       password.value = "";
       show(orgChoice, false);
       show(loginForm, true);
@@ -380,7 +401,8 @@
       show(chatForm, false);
       log.replaceChildren();
       if (reason) {
-        loginError.textContent = reason;
+        // Every reason here is an ended login; the login screen says so in its own (English) words.
+        loginError.textContent = t("login_expired");
         show(loginError, true);
       }
     }
@@ -389,25 +411,43 @@
       clearConversation();  // a new token never inherits earlier state
       log.replaceChildren();
       token = newToken;
+      rememberLogin(newToken);
       username.value = "";
       password.value = "";
+      // The CRM value wins at every new session; without one, English (never saved by itself).
       const saved = crmLanguage === "he" || crmLanguage === "en" ? crmLanguage : null;
-      if (chosenBeforeLogin) {
-        // A choice made on the login screen is explicit: it wins, and is saved now.
-        language = chosenBeforeLogin;
-        languageState = { language, toggled: true, streak: 0, saved, retry: null };
-        chosenBeforeLogin = null;
-      } else {
-        // The CRM value wins at every new session; without one, the browser's (never saved).
-        if (saved) language = saved;
-        languageState = { language, toggled: false, streak: 0, saved, retry: null };
-      }
+      language = saved || "en";
+      languageState = { language, toggled: false, streak: 0, saved, retry: null };
       applyLanguage();
+      show(document.getElementById("language-toggle"), true);
       show(document.getElementById("login-panel"), false);
       show(document.getElementById("session"), true);
       show(chatForm, true);
       addMenu();
-      if (languageState.toggled && languageState.saved !== language) saveLanguage(language);
+    }
+
+    // A reopened page with a remembered login: the server checks it with the CRM and reads
+    // the language again. 401 -> forgotten; any other failure -> the login screen, token kept.
+    async function resumeLogin() {
+      const kept = rememberedLogin();
+      if (!kept) return;
+      let res, data;
+      try {
+        res = await fetch("/auth/session", { method: "POST", headers: { "Authorization": "Bearer " + kept } });
+        data = await res.json().catch(() => ({}));
+      } catch (err) {
+        res = null;
+      }
+      if (token) return;  // logged in by hand meanwhile
+      if (res && res.ok && data.status === "logged_in") {
+        loggedIn(kept, data.language);
+        return;
+      }
+      if (res && res.status === 401) forgetLogin();
+      else {
+        loginError.textContent = (data && data.reply) || t("assistant_unreachable");
+        show(loginError, true);
+      }
     }
 
     // Save an explicit choice (POST /assistant/language). Never the same value twice; a failure
@@ -448,12 +488,9 @@
     }
 
     function toggleLanguage() {
+      if (!token) return;  // the toggle is shown only after login
       language = language === "he" ? "en" : "he";
       applyLanguage();
-      if (!token) {
-        chosenBeforeLogin = language;  // saved after login
-        return;
-      }
       // A press applies at once, counts as "toggled" for this session and resets the row.
       languageState.language = language;
       languageState.toggled = true;
@@ -722,6 +759,7 @@
     });
 
     applyLanguage();
+    resumeLogin();
   </script>
 </body>
 </html>

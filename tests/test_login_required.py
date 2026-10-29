@@ -55,6 +55,7 @@ def test_every_route_except_page_health_and_login_needs_a_token(client, fake_crm
         "/chat": {"message": QUESTION},
         "/assistant/turn": {"intent": "ask_question", "message": QUESTION},
         "/assistant/language": {"language": "he"},
+        "/auth/session": {},
         "/crm/contact-drafts/proposals": {"fields": {"first_name": "Dana"}},
         "/crm/contact-drafts/proposals/{proposal_id}/confirm": {"payload_hash": "a" * 64},
     }
