@@ -14,9 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import apartment_chat, contact_chat, crm, crm_api, generation, knowledge, planner, rate_limit
+from app import apartment_chat, contact_chat, crm, crm_api, generation, knowledge, language as user_language
+from app import planner, rate_limit
 from app.apartment_chat import ApartmentEditState
 from app.contact_chat import ContactDraftFields, ConversationState
+from app.language import LanguageState
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -47,6 +49,8 @@ app = FastAPI(
 
 class ChatRequest(BaseModel):
     message: str
+    # The user's language (docs/instructions19.md); replies and the answer follow it.
+    language: Optional[Literal["en", "he"]] = None
 
 
 # --- Login required (docs/instructions17.md) ----------------------------------
@@ -166,13 +170,24 @@ def chat(
     """A guide question (or a demo action). Login required since instructions17:
     it was open before; the assistant will be public, and each answer can cost
     an AI provider call."""
-    _, refusal = _require_login(http_request, credentials)
+    language = request.language or "en"
+    _, refusal = _require_login(http_request, credentials, language)
     if refusal is not None:
         return refusal
-    return answer_message(request.message)
+    return answer_message(request.message, language)
 
 
-def answer_message(message: str) -> dict:
+PLACEHOLDER_REPLY = {
+    "en": "Placeholder function that would run: {function}()\nDemo result:\n{result}",
+    "he": "פונקציית הדגמה שהייתה רצה: {function}()\nתוצאת הדגמה:\n{result}",
+}
+CLARIFY = {
+    "en": "What would you like to do? You can ask me to find, add or update a contact, or ask how to do something.",
+    "he": "מה תרצו לעשות? אפשר לבקש ממני למצוא, להוסיף או לעדכן איש קשר, או לשאול איך עושים משהו.",
+}
+
+
+def answer_message(message: str, language: str = "en") -> dict:
     """The /chat work, for a request that already passed the login check."""
     plan = planner.plan(message)
     route = plan["route"]
@@ -180,23 +195,19 @@ def answer_message(message: str) -> dict:
     generation_info = None
 
     if route == "action" and plan["action"] == "add":
-        reply = crm.ADD_CONTACT_POINTER
+        reply = crm.ADD_CONTACT_POINTER[language]
     elif route == "action":
-        function_name, result = crm.pick_placeholder(message, plan["action"])
-        reply = (
-            f"Placeholder function that would run: {function_name}()\n"
-            f"Demo result:\n{json.dumps(result, indent=2)}"
-        )
+        function_name, result = crm.pick_placeholder(message, plan["action"], language)
+        reply = PLACEHOLDER_REPLY[language].format(
+            function=function_name, result=json.dumps(result, indent=2, ensure_ascii=False))
     elif route == "knowledge":
+        # Both guides are searched whatever the language; the answer is written in the user's language.
         passages = knowledge.search(message)
-        generated = generation.generate_answer(message, passages)
+        generated = generation.generate_answer(message, passages, language=language)
         generation_info = generated.as_dict()
-        reply = knowledge.format_reply(message, passages, generated)
+        reply = knowledge.format_reply(message, passages, generated, language)
     else:  # clarify: empty message
-        reply = (
-            "What would you like to do? You can ask me to find, add or update "
-            "a contact, or ask how to do something."
-        )
+        reply = CLARIFY[language]
 
     return {
         "reply": reply,
@@ -204,6 +215,7 @@ def answer_message(message: str) -> dict:
         "route_source": plan["route_source"],
         "passages": passages,
         "generation": generation_info,
+        "language": language,
     }
 
 
@@ -345,6 +357,8 @@ class TurnRequest(BaseModel):
     # Held by the page between turns (edit_apartment only). Contains no token.
     apartment_state: Optional[ApartmentEditState] = None
     language: Optional[Literal["en", "he"]] = None
+    # The session language and its detection state (app/language.py). Held by the page; no token.
+    language_state: Optional[LanguageState] = None
 
 
 @app.post("/assistant/turn")
@@ -356,30 +370,99 @@ def assistant_turn(
     """One step of the conversation. Every intent needs a login the CRM confirms
     first; the token then goes only to the CRM (login check and bridge)."""
     held = request.apartment_state or request.state
-    language = request.language or (held.language if held else "en")
-    token, refusal = _require_login(http_request, credentials, language, intent=request.intent)
+    session = request.language_state or LanguageState(
+        language=request.language or (held.language if held else "en"))
+    before = session.language
+    token, refusal = _require_login(http_request, credentials, session.language, intent=request.intent)
     if refusal is not None:
         return refusal
+    answer = _turn(token, request, session)
+    # After the work: save a language change (or retry a failed save once). Never blocks the answer.
+    notice = user_language.settle(token, session, changed=session.language != before)
+    answer["language_state"] = session.model_dump()
+    answer["language_notice"] = user_language.notice(notice, session.language)
+    return answer
+
+
+def _turn(token: str, request: TurnRequest, session: LanguageState) -> dict:
+    """One turn in the session language. Only typed free text may change it (app/language.py):
+    an Ask question, or a free message in the contact flow (minus the field values read from it).
+    Menu choices (an empty message), button taps and every apartment-flow message never do."""
+    message = request.message
 
     if request.intent == "update_contact":
         # Not built: never calls the bridge or the CRM.
         return {"intent": "update_contact", "outcome": "not_available",
-                "reply": UPDATE_NOT_AVAILABLE[language], "show_menu": True}
+                "reply": UPDATE_NOT_AVAILABLE[session.language], "show_menu": True}
 
     if request.intent == "ask_question":
-        if not request.message.strip():
-            return {"intent": "ask_question", "outcome": "ask", "reply": ASK_A_QUESTION[language]}
-        return {"intent": "ask_question", "outcome": "answered", **answer_message(request.message)}
+        if not message.strip():
+            return {"intent": "ask_question", "outcome": "ask", "reply": ASK_A_QUESTION[session.language]}
+        user_language.observe(session, message)
+        return {"intent": "ask_question", "outcome": "answered", **answer_message(message, session.language)}
 
     if request.intent == "edit_apartment":
-        # sheepsidebay_crm docs/fixes115.md: behind the same login check above.
-        if not request.message.strip():
-            return apartment_chat.start(language)
-        state = request.apartment_state or ApartmentEditState(language=language)
-        return apartment_chat.handle_turn(token, request.message, state)
+        # sheepsidebay_crm docs/fixes115.md: behind the same login check above. Every message
+        # here is an address, a pick, a field value or a confirm word: none changes the language.
+        if not message.strip():
+            return apartment_chat.start(session.language)
+        state = request.apartment_state or ApartmentEditState(language=session.language)
+        state.language = session.language
+        return apartment_chat.handle_turn(token, message, state)
 
     # create_contact.
-    if not request.message.strip():
-        return contact_chat.start(language)
-    state = request.state or ConversationState(language=language)
-    return contact_chat.handle_turn(token, request.message, state)
+    if not message.strip():
+        return contact_chat.start(session.language)
+    state = request.state or ConversationState(language=session.language)
+    state.language = session.language
+
+    def observe(text: str, values) -> str:
+        return user_language.observe(session, text, values).language
+
+    return contact_chat.handle_turn(token, message, state, observe=observe)
+
+
+# --- The user's language: the toggle's save (docs/instructions19.md) -------------
+
+INVALID_LANGUAGE = {
+    "en": "The language must be Hebrew or English.",
+    "he": "השפה צריכה להיות עברית או אנגלית.",
+}
+
+
+@app.post("/assistant/language")
+async def save_language(
+    http_request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(crm_bearer),
+):
+    """Save the user's language in the CRM (preference "locale"). Body {"language": "he" | "en"}.
+
+    Same rate limit group and login check as the chat; any other value -> 400, nothing called.
+    A failed save is an error here, but the page keeps the language for the session and the
+    next turn tries the save once more (app/language.py).
+    """
+    refusal = _rate_limited(http_request, "chat")
+    if refusal is not None:
+        return refusal
+    token = _bearer_token(credentials)
+    if token is None:
+        return _gate_refusal("unauthorized", "en")
+    try:
+        body = await http_request.json()
+    except ValueError:
+        body = None
+    wanted = body.get("language") if isinstance(body, dict) and set(body) == {"language"} else None
+    if wanted not in user_language.LANGUAGES:
+        return JSONResponse(status_code=400, headers=NO_STORE, content={
+            "status": "invalid_language", "reply": INVALID_LANGUAGE["en"] + " / " + INVALID_LANGUAGE["he"]})
+    verdict = await run_in_threadpool(crm_api.verify_login, token)
+    if verdict.http_status != 200:
+        return _gate_refusal(verdict.body["status"], wanted)
+    result = await run_in_threadpool(user_language.save, token, wanted)
+    if result.http_status == 200:
+        return JSONResponse(status_code=200, headers=NO_STORE, content={
+            "status": "saved", "language": wanted, "reply": user_language.notice("saved", wanted)})
+    if result.body.get("status") == "unauthorized":
+        return _gate_refusal("unauthorized", wanted)
+    return JSONResponse(status_code=502, headers=NO_STORE, content={
+        "status": "not_saved", "language": wanted, "reply": user_language.notice("save_failed", wanted)})

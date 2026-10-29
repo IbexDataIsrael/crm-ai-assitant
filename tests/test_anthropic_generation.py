@@ -51,7 +51,7 @@ def test_request_sends_only_question_and_passages_with_output_cap(fake_anthropic
     request = fake_anthropic.creates[0]
     assert request == {
         "model": "claude-haiku-4-5-20251001",
-        "system": generation.SYSTEM_INSTRUCTION,
+        "system": generation.system_instruction("en"),
         "messages": [{"role": "user", "content": generation.build_input(QUESTION, PASSAGES)}],
         "max_tokens": 1000,
     }

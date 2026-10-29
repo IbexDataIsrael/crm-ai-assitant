@@ -551,7 +551,7 @@ def test_an_option_field_without_options_is_not_trusted(client, fake_crm):
 def test_hebrew_flow_uses_the_crms_hebrew_labels(client, fake_crm):
     apartment = apt(building_address="הרצל 10")
     fake_crm.answers += [search(apartment), ok(apartment)]
-    data = turn(client, "הרצל 10")
+    data = turn(client, "הרצל 10", language="he")
     assert "דירה #11: הרצל 10, דירה 3, קומה 1" in data["reply"] and "1. סטטוס יהודי" in data["reply"]
     value = turn(client, "1", data["state"])
     assert "הערך הנוכחי: לא ידוע" in value["reply"] and "1. יהודי" in value["reply"]
@@ -585,6 +585,9 @@ def test_the_state_holds_no_field_list_and_no_token(client, fake_crm):
 def test_no_field_name_label_or_option_is_kept_in_the_assistant_code():
     code = "\n".join((ROOT / path).read_text(encoding="utf-8")
                      for path in ("app/apartment_chat.py", "app/crm_api.py", "app/main.py", "static/index.html"))
+    # The language toggle's own labels (docs/instructions19.md) are the same words as the fixture's
+    # language options; they are the page's text, not CRM options.
+    code = code.replace('other_language: "עברית"', "").replace('other_language: "English"', "")
     # Quoted: a string literal for a key, label or option (plain words like "English" appear in page text).
     for field in ADMIN_FIELDS:
         assert field["field_key"] not in code
@@ -595,3 +598,41 @@ def test_no_field_name_label_or_option_is_kept_in_the_assistant_code():
                     assert f'"{text}"' not in code
     for old in ("jewish_status", "Jewish_status", "label_he", "/apartments/fields", "mezuzah", "report_number"):
         assert old not in code
+
+
+# --- labels by the user's language (docs/instructions19.md) ----------------------------
+
+ONE_LANGUAGE = {"field_key": "customfield.apartment.notes_x", "label": "הערות מיוחדות", "label_en": None,
+                "kind": "single_option", "current_value": "b",
+                "options": [{"value": "a", "label": None, "label_en": "Only English"},
+                            {"value": "b", "label": "רק עברית", "label_en": None},
+                            {"value": "c-7", "label": None, "label_en": None}]}
+ENGLISH_ONLY = {"field_key": "customfield.apartment.code_y", "label": None, "label_en": "Gate code",
+                "kind": "text", "current_value": "A-17"}
+
+
+@pytest.mark.parametrize("language", ["en", "he"])
+def test_labels_follow_the_language_and_one_language_items_show_as_they_are(client, fake_crm, language):
+    apartment = apt(apartment_id=4071, lineage_id=902, fields=[STATUS, ONE_LANGUAGE, ENGLISH_ONLY])
+    fake_crm.answers += [search(apartment), ok(apartment)]
+    data = turn(client, "Herzl", language=language)
+    # label_en in English, label in Hebrew; a label in one language only is shown as it is.
+    expected = (["1. Jewish status", "2. הערות מיוחדות", "3. Gate code"] if language == "en"
+                else ["1. סטטוס יהודי", "2. הערות מיוחדות", "3. Gate code"])
+    for line in expected:
+        assert line in data["reply"]
+    assert "#4071" in data["reply"] and "Herzl 10, Tel Aviv" in data["reply"]  # IDs and CRM values as given
+    assert data["state"]["apartment_id"] == 4071 and data["state"]["lineage_id"] == 902
+    fake_crm.answers.append(ok(apartment))
+    value = turn(client, "2", data["state"], language=language)
+    # Options: same rule; one with no label at all shows its value; the value sent is the CRM's.
+    assert [c["label"] for c in value["choices"]] == ["1. Only English", "2. רק עברית", "3. c-7"]
+    assert [c["message"] for c in value["choices"]] == ["1", "2", "3"]
+    fake_crm.answers.append(ok(apartment))
+    confirm = turn(client, "3", value["state"], language=language)
+    fake_crm.answers.append(answer(with_value(apt(4072, 902, fields=[STATUS, ONE_LANGUAGE, ENGLISH_ONLY]),
+                                              ONE_LANGUAGE["field_key"], "c-7"), ONE_LANGUAGE["field_key"],
+                                   previous=4071))
+    turn(client, "yes" if language == "en" else "כן", confirm["state"], language=language)
+    assert json.loads(posts(fake_crm)[-1].content) == {"field_key": "customfield.apartment.notes_x", "value": "c-7"}
+    assert posts(fake_crm)[-1].url.path == "/api/assistant/apartments/4071/update"

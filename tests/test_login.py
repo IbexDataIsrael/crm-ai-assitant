@@ -36,7 +36,7 @@ def test_success_returns_the_token_only_to_the_page(client, fake_crm, caplog):
                                                       "requires_org_selection": False, "organizations": []}))
     response = log_in(client)
     assert response.status_code == 200
-    assert response.json() == {"status": "logged_in", "access_token": TOKEN}
+    assert response.json() == {"status": "logged_in", "access_token": TOKEN, "language": None}
     assert response.headers["cache-control"] == "no-store"
     assert "set-cookie" not in response.headers  # the token is not put in a cookie
     request = fake_crm.requests[0]
@@ -69,7 +69,7 @@ def test_several_organizations_ask_for_a_choice_then_log_in_with_it(client, fake
     assert "organization_id" not in form_of(fake_crm.requests[0])
 
     second = log_in(client, organization_id=2)
-    assert second.json() == {"status": "logged_in", "access_token": TOKEN}
+    assert second.json() == {"status": "logged_in", "access_token": TOKEN, "language": None}
     assert form_of(fake_crm.requests[1])["organization_id"] == "2"
 
 

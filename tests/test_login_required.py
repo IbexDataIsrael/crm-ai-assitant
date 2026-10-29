@@ -54,6 +54,7 @@ def test_every_route_except_page_health_and_login_needs_a_token(client, fake_crm
     bodies = {
         "/chat": {"message": QUESTION},
         "/assistant/turn": {"intent": "ask_question", "message": QUESTION},
+        "/assistant/language": {"language": "he"},
         "/crm/contact-drafts/proposals": {"fields": {"first_name": "Dana"}},
         "/crm/contact-drafts/proposals/{proposal_id}/confirm": {"payload_hash": "a" * 64},
     }
@@ -68,7 +69,7 @@ def test_every_route_except_page_health_and_login_needs_a_token(client, fake_crm
         assert response.status_code == 401, path
         checked.add(path)
     assert checked == set(bodies)
-    assert fake_crm.requests == [] and fake_crm.me_requests == []
+    assert fake_crm.requests == [] and fake_crm.me_requests == [] and fake_crm.pref_requests == []
 
 
 @pytest.mark.parametrize("intent", ["create_contact", "update_contact", "edit_apartment", "ask_question"])

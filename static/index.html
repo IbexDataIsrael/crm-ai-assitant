@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>CRM Assistant (demo)</title>
+  <title>CRM Assistant</title>
   <style>
     body { font-family: Arial, sans-serif; font-size: 20px; margin: 0 auto; max-width: 800px; padding: 16px; background: #fff; color: #222; }
     h1 { font-size: 28px; }
@@ -14,7 +14,7 @@
     .bot { background: #f3f3f3; }
     .meta { font-size: 16px; color: #555; margin-top: 8px; }
     .demo { color: #a33; font-weight: bold; }
-    .section { border-radius: 6px; padding: 10px; margin: 8px 0; border-left: 6px solid; }
+    .section { border-radius: 6px; padding: 10px; margin: 8px 0; border-inline-start: 6px solid; }
     .section-title { font-size: 16px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.03em; margin: 0 0 6px; }
     .answer { background: #eaf6ec; border-color: #2e7d32; }
     .notice { background: #fff8e1; border-color: #b7791f; }
@@ -23,7 +23,7 @@
     .source { border-top: 1px solid #ddd; padding: 8px 0; }
     .source:first-of-type { border-top: none; }
     .source-head { font-size: 16px; color: #333; }
-    .cited { font-size: 14px; font-weight: bold; color: #fff; background: #2e7d32; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+    .cited { font-size: 14px; font-weight: bold; color: #fff; background: #2e7d32; border-radius: 4px; padding: 1px 6px; margin-inline-start: 6px; }
     .small { font-size: 16px; color: #555; }
     form { display: flex; gap: 8px; }
     input { flex: 1; font-size: 20px; padding: 10px; min-width: 0; }
@@ -34,8 +34,9 @@
     #login-form { flex-direction: column; align-items: stretch; }
     #login-form label { font-size: 16px; color: #333; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .choices { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-    .soon { font-size: 14px; font-weight: bold; color: #555; background: #eee; border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+    .soon { font-size: 14px; font-weight: bold; color: #555; background: #eee; border-radius: 4px; padding: 1px 6px; margin-inline-start: 6px; }
     .live { color: #8a4b00; font-weight: bold; }
     .multi { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
     .multi label { display: flex; gap: 8px; align-items: center; font-size: 18px; }
@@ -43,41 +44,186 @@
     .long { flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 320px; overflow-y: auto; }
     .long button { text-align: start; }
     .filter { margin-top: 8px; width: 100%; box-sizing: border-box; }
+    .lang-note { font-size: 16px; color: #555; }
   </style>
 </head>
 <body>
-  <h1>CRM Assistant</h1>
-  <p class="demo">Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. Typed "find" / "update" commands still return demo data.</p>
-  <p class="live">Create a contact talks to the real CRM at CRM_API_URL: a draft you confirm with "yes" is saved there as a real record.
-    Edit an apartment also talks to the real CRM: a change you confirm with "yes" is saved there.</p>
+  <div class="top">
+    <h1 data-t="title">CRM Assistant</h1>
+    <!-- Shows the OTHER language's name; a press switches at once (docs/instructions19.md). -->
+    <button type="button" id="language-toggle">עברית</button>
+  </div>
+  <p class="demo" data-t="banner_demo"></p>
+  <p class="live" data-t="banner_live"></p>
 
   <section id="login-panel" class="panel">
+    <!-- Before login the user's language is unknown: the login form stays bilingual. -->
     <form id="login-form">
-      <label for="username">CRM username or email</label>
+      <label for="username">CRM username or email / שם משתמש או אימייל ב-CRM</label>
       <input id="username" autocomplete="username" required>
-      <label for="password">Password</label>
+      <label for="password">Password / סיסמה</label>
       <input id="password" type="password" autocomplete="current-password" required>
-      <button type="submit" id="login-button">Log in</button>
+      <button type="submit" id="login-button">Log in / התחברות</button>
     </form>
     <div id="org-choice" class="hidden">
-      <p>This login belongs to several organizations. Choose one:</p>
+      <p>This login belongs to several organizations. Choose one: / ההתחברות הזו שייכת לכמה ארגונים. בחרו אחד:</p>
       <div id="org-buttons" class="choices"></div>
     </div>
     <div id="login-error" class="section error hidden"></div>
   </section>
 
   <div id="session" class="row hidden">
-    <span class="small">Logged in to the CRM.</span>
-    <button type="button" id="logout">Log out</button>
+    <span class="small" data-t="logged_in"></span>
+    <button type="button" id="logout" data-t="log_out"></button>
   </div>
 
   <div id="log"></div>
   <form id="form" class="hidden">
-    <input id="message" autocomplete="off" placeholder="Type a message..." aria-label="Message">
-    <button type="submit">Send</button>
+    <input id="message" autocomplete="off" data-t-placeholder="placeholder" aria-label="Message">
+    <button type="submit" data-t="send"></button>
   </form>
 
   <script>
+    // --- The user's language (docs/instructions19.md) -------------------------
+    // One he/en dictionary for every text the page writes itself. Server replies
+    // arrive already in the session language; CRM values, labels, IDs and guide
+    // passages are shown exactly as they come.
+    const TEXT = {
+      en: {
+        title: "CRM Assistant",
+        other_language: "עברית",
+        banner_demo: "Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. Typed \"find\" / \"update\" commands still return demo data.",
+        banner_live: "Create a contact talks to the real CRM: a draft you confirm with \"yes\" is saved there as a real record. Edit an apartment also talks to the real CRM: a change you confirm with \"yes\" is saved there.",
+        logged_in: "Logged in to the CRM.",
+        log_out: "Log out",
+        placeholder: "Type a message...",
+        send: "Send",
+        menu: "What do you want to do?",
+        menu_create: "Create a contact",
+        menu_update: "Update a contact",
+        menu_apartment: "Edit an apartment",
+        menu_ask: "Ask a question",
+        soon: "coming later",
+        choose_first: "Please choose from the menu first.",
+        yes: "yes",
+        no: "no",
+        save: "Save",
+        filter: "Filter...",
+        answer_title: "AI-generated answer ({provider}, {model})",
+        answer_note: "Based only on the source passages below. Cited: {cited}",
+        insufficient_title: "No answer - the sources don't cover this",
+        insufficient_text: "{provider} ({model}) found that the passages below don't answer this question.",
+        off_title: "No AI-written answer - generation is off",
+        off_text: "{error}. Showing the retrieved passages only.",
+        failed_title: "Error - answer generation failed",
+        failed_note: "No answer was generated. The passages below are retrieval results only.",
+        sources_title: "Source passages - local semantic retrieval (CRM user guides)",
+        similarity: "similarity",
+        cited: "cited",
+        route: "Route: {route} ({source}) · ",
+        demo_action: "Demo CRM data - no live CRM",
+        demo: "Demo - no live CRM",
+        request_failed: "Error - request failed",
+        http_error: "The server returned HTTP {status}.",
+        server_unreachable: "Could not reach the server ({error}).",
+        login_expired: "Your CRM login is no longer valid. Please log in again.",
+        assistant_unreachable: "Could not reach the assistant server.",
+        login_failed: "Login failed ({status}).",
+        language_saved: "Language saved.",
+        language_not_saved: "I could not save your language. It will stay for this session.",
+        login: {
+          invalid_credentials: "Incorrect username or password.",
+          not_verified: "This account's email is not verified yet.",
+          org_pending: "Your organization is still waiting for approval.",
+          org_disabled: "Your organization has been disabled. Contact support.",
+          login_refused: "The CRM refused this login.",
+          rate_limited: "Too many login attempts. Wait a little and try again.",
+          crm_not_configured: "The assistant is not connected to a CRM (CRM_API_URL is not set).",
+          crm_unreachable: "Could not reach the CRM.",
+          crm_timeout: "The CRM did not answer in time.",
+          invalid_request: "Enter a username (or email) and a password.",
+        },
+      },
+      he: {
+        title: "עוזר ה-CRM",
+        other_language: "English",
+        banner_demo: "\"שאלה\" מחפשת במדריכים למשתמש של ה-CRM (באנגלית ובעברית); תשובה שנכתבה ב-AI מופיעה רק כשמוגדר מפתח לספק תשובות. פקודות \"מצא\" / \"עדכן\" שמוקלדות עדיין מחזירות נתוני הדגמה.",
+        banner_live: "\"יצירת איש קשר\" עובדת מול ה-CRM האמיתי: טיוטה שתאשרו ב\"כן\" נשמרת שם כרשומה אמיתית. גם \"עריכת דירה\" עובדת מול ה-CRM האמיתי: שינוי שתאשרו ב\"כן\" נשמר שם.",
+        logged_in: "מחוברים ל-CRM.",
+        log_out: "התנתקות",
+        placeholder: "כתבו הודעה...",
+        send: "שליחה",
+        menu: "מה תרצו לעשות?",
+        menu_create: "יצירת איש קשר",
+        menu_update: "עדכון איש קשר",
+        menu_apartment: "עריכת דירה",
+        menu_ask: "שאלה",
+        soon: "בקרוב",
+        choose_first: "אנא בחרו קודם מהתפריט.",
+        yes: "כן",
+        no: "לא",
+        save: "שמירה",
+        filter: "סינון...",
+        answer_title: "תשובה שנכתבה ב-AI ({provider}, {model})",
+        answer_note: "מבוססת רק על קטעי המקור שלהלן. צוטטו: {cited}",
+        insufficient_title: "אין תשובה - המקורות לא מכסים את זה",
+        insufficient_text: "{provider} ({model}) מצא שהקטעים שלהלן אינם עונים על השאלה.",
+        off_title: "אין תשובה שנכתבה ב-AI - יצירת התשובות כבויה",
+        off_text: "{error}. מוצגים רק הקטעים שנמצאו.",
+        failed_title: "שגיאה - יצירת התשובה נכשלה",
+        failed_note: "לא נוצרה תשובה. הקטעים שלהלן הם תוצאות חיפוש בלבד.",
+        sources_title: "קטעי מקור - חיפוש סמנטי מקומי (המדריכים למשתמש של ה-CRM)",
+        similarity: "דמיון",
+        cited: "צוטט",
+        route: "מסלול: {route} ({source}) · ",
+        demo_action: "נתוני CRM להדגמה - לא CRM חי",
+        demo: "הדגמה - לא CRM חי",
+        request_failed: "שגיאה - הבקשה נכשלה",
+        http_error: "השרת החזיר HTTP {status}.",
+        server_unreachable: "לא ניתן להגיע לשרת ({error}).",
+        login_expired: "ההתחברות ל-CRM כבר אינה בתוקף. אנא התחברו שוב.",
+        assistant_unreachable: "לא ניתן להגיע לשרת העוזר.",
+        login_failed: "ההתחברות נכשלה ({status}).",
+        language_saved: "השפה נשמרה.",
+        language_not_saved: "לא הצלחתי לשמור את השפה. היא תישאר לשיחה הזו.",
+        login: {
+          invalid_credentials: "שם משתמש או סיסמה שגויים.",
+          not_verified: "כתובת האימייל של החשבון עדיין לא אומתה.",
+          org_pending: "הארגון שלכם עדיין ממתין לאישור.",
+          org_disabled: "הארגון שלכם הושבת. פנו לתמיכה.",
+          login_refused: "ה-CRM דחה את ההתחברות.",
+          rate_limited: "יותר מדי ניסיונות התחברות. המתינו ונסו שוב.",
+          crm_not_configured: "העוזר אינו מחובר ל-CRM (CRM_API_URL לא הוגדר).",
+          crm_unreachable: "לא ניתן להגיע ל-CRM.",
+          crm_timeout: "ה-CRM לא ענה בזמן.",
+          invalid_request: "הזינו שם משתמש (או אימייל) וסיסמה.",
+        },
+      },
+    };
+
+    // Before login: the browser's language, a passive fallback that is never saved.
+    let language = (navigator.language || "en").toLowerCase().startsWith("he") ? "he" : "en";
+    // After login: the session's language state, as app/language.py defines it
+    // (language, toggled, streak, saved, retry). Sent with every turn; no token in it.
+    let languageState = null;
+    // A toggle press on the login screen: applied at once, saved after login.
+    let chosenBeforeLogin = null;
+
+    function t(key, values) {
+      let text = TEXT[language][key];
+      Object.entries(values || {}).forEach(([name, value]) => { text = text.split("{" + name + "}").join(String(value)); });
+      return text;
+    }
+
+    function applyLanguage() {
+      document.documentElement.lang = language;
+      document.documentElement.dir = language === "he" ? "rtl" : "ltr";
+      document.title = t("title");
+      document.querySelectorAll("[data-t]").forEach(n => { n.textContent = t(n.getAttribute("data-t")); });
+      document.querySelectorAll("[data-t-placeholder]").forEach(n => { n.placeholder = t(n.getAttribute("data-t-placeholder")); });
+      document.getElementById("language-toggle").textContent = t("other_language");
+    }
+
     const log = document.getElementById("log");
     const input = document.getElementById("message");
 
@@ -89,6 +235,13 @@
       return node;
     }
 
+    // A bot bubble in the current language's direction.
+    function botBubble() {
+      const div = el("div", "msg bot");
+      div.dir = language === "he" ? "rtl" : "ltr";
+      return div;
+    }
+
     function section(cls, title) {
       const box = el("section", "section " + cls);
       box.appendChild(el("h2", "section-title", title));
@@ -98,58 +251,61 @@
     // Part 1 of a knowledge reply: the AI answer, or why there is none.
     function answerSection(g) {
       if (g.status === "answered") {
-        const box = section("answer", "AI-generated answer (" + g.provider + ", " + g.model + ")");
+        const box = section("answer", t("answer_title", { provider: g.provider, model: g.model }));
         box.appendChild(el("div", "text", g.answer));
         const cited = g.citations.map(c => "[" + c.number + "] " + c.filename + " > " + c.heading).join("; ");
-        box.appendChild(el("div", "small", "Based only on the source passages below. Cited: " + cited));
+        box.appendChild(el("div", "small", t("answer_note", { cited })));
         return box;
       }
       if (g.status === "insufficient_sources") {
-        const box = section("notice", "No answer - the sources don't cover this");
-        box.appendChild(el("div", "text", g.provider + " (" + g.model + ") found that the passages below don't answer this question."));
+        const box = section("notice", t("insufficient_title"));
+        box.appendChild(el("div", "text", t("insufficient_text", { provider: g.provider, model: g.model })));
         return box;
       }
       if (g.status === "no_api_key") {
-        const box = section("notice", "No AI-written answer - generation is off");
-        box.appendChild(el("div", "text", g.error + ". Showing the retrieved passages only."));
+        const box = section("notice", t("off_title"));
+        box.appendChild(el("div", "text", t("off_text", { error: g.error })));
         return box;
       }
-      const box = section("error", "Error - answer generation failed");
+      const box = section("error", t("failed_title"));
       box.appendChild(el("div", "text", g.error));
-      box.appendChild(el("div", "small", "No answer was generated. The passages below are retrieval results only."));
+      box.appendChild(el("div", "small", t("failed_note")));
       return box;
     }
 
     // Part 2: the retrieved passages, marked when the answer cited them.
     function sourcesSection(passages, g) {
       const citedNumbers = new Set((g && g.status === "answered") ? g.citations.map(c => c.number) : []);
-      const box = section("sources", "Source passages - local semantic retrieval (CRM user guides)");
+      const box = section("sources", t("sources_title"));
       passages.forEach((p, i) => {
         const item = el("div", "source");
-        const head = el("div", "source-head", "[" + (i + 1) + "] " + p.filename + " > " + p.heading + " (similarity " + p.score.toFixed(2) + ")");
-        if (citedNumbers.has(i + 1)) head.appendChild(el("span", "cited", "cited"));
+        const head = el("div", "source-head", "[" + (i + 1) + "] " + p.filename + " > " + p.heading + " (" + t("similarity") + " " + p.score.toFixed(2) + ")");
+        if (citedNumbers.has(i + 1)) head.appendChild(el("span", "cited", t("cited")));
         item.appendChild(head);
-        item.appendChild(el("div", "text", p.text));
+        const passage = el("div", "text", p.text);
+        passage.dir = "auto";  // a passage keeps its guide's language
+        item.appendChild(passage);
         box.appendChild(item);
       });
       return box;
     }
 
     function metaLine(data) {
-      const m = el("div", "meta", "Route: " + data.route + " (" + data.route_source + ") · ");
-      m.appendChild(el("span", "demo", data.route === "action" ? "Demo CRM data - no live CRM" : "Demo - no live CRM"));
+      const m = el("div", "meta", t("route", { route: data.route, source: data.route_source }));
+      m.appendChild(el("span", "demo", data.route === "action" ? t("demo_action") : t("demo")));
       return m;
     }
 
     function addUser(text) {
       const div = el("div", "msg user");
+      div.dir = "auto";  // the user's own words, in whatever language they were typed
       div.appendChild(el("div", "text", text));
       log.appendChild(div);
       div.scrollIntoView();
     }
 
     function addBot(data) {
-      const div = el("div", "msg bot");
+      const div = botBubble();
       if (data.route === "knowledge" && data.generation) {
         div.appendChild(answerSection(data.generation));
         div.appendChild(sourcesSection(data.passages, data.generation));
@@ -162,10 +318,17 @@
     }
 
     function addRequestError(message) {
-      const div = el("div", "msg bot");
-      const box = section("error", "Error - request failed");
+      const div = botBubble();
+      const box = section("error", t("request_failed"));
       box.appendChild(el("div", "text", message));
       div.appendChild(box);
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    function addNotice(text) {
+      const div = botBubble();
+      div.appendChild(el("div", "lang-note", text));
       log.appendChild(div);
       div.scrollIntoView();
     }
@@ -181,20 +344,6 @@
     // One turn at a time: while a request is in flight, sending and every
     // choice button are off, so one tap can never send an update twice.
     let busy = false;
-    const language = (navigator.language || "en").toLowerCase().startsWith("he") ? "he" : "en";
-
-    const LOGIN_ERRORS = {
-      invalid_credentials: "Incorrect username or password. / שם משתמש או סיסמה שגויים.",
-      not_verified: "This account's email is not verified yet. / כתובת האימייל של החשבון עדיין לא אומתה.",
-      org_pending: "Your organization is still waiting for approval. / הארגון שלכם עדיין ממתין לאישור.",
-      org_disabled: "Your organization has been disabled. Contact support. / הארגון שלכם הושבת. פנו לתמיכה.",
-      login_refused: "The CRM refused this login. / ה-CRM דחה את ההתחברות.",
-      rate_limited: "Too many login attempts. Wait a little and try again. / יותר מדי ניסיונות התחברות. המתינו ונסו שוב.",
-      crm_not_configured: "The assistant is not connected to a CRM (CRM_API_URL is not set). / העוזר אינו מחובר ל-CRM.",
-      crm_unreachable: "Could not reach the CRM. / לא ניתן להגיע ל-CRM.",
-      crm_timeout: "The CRM did not answer in time. / ה-CRM לא ענה בזמן.",
-      invalid_request: "Enter a username (or email) and a password. / הזינו שם משתמש (או אימייל) וסיסמה.",
-    };
 
     const loginForm = document.getElementById("login-form");
     const username = document.getElementById("username");
@@ -220,6 +369,9 @@
     function logout(reason) {
       token = null;
       clearConversation();
+      // The next login reads the CRM's value again; the page keeps showing the current language until then.
+      languageState = null;
+      chosenBeforeLogin = null;
       password.value = "";
       show(orgChoice, false);
       show(loginForm, true);
@@ -233,16 +385,90 @@
       }
     }
 
-    function loggedIn(newToken) {
+    function loggedIn(newToken, crmLanguage) {
       clearConversation();  // a new token never inherits earlier state
       log.replaceChildren();
       token = newToken;
       username.value = "";
       password.value = "";
+      const saved = crmLanguage === "he" || crmLanguage === "en" ? crmLanguage : null;
+      if (chosenBeforeLogin) {
+        // A choice made on the login screen is explicit: it wins, and is saved now.
+        language = chosenBeforeLogin;
+        languageState = { language, toggled: true, streak: 0, saved, retry: null };
+        chosenBeforeLogin = null;
+      } else {
+        // The CRM value wins at every new session; without one, the browser's (never saved).
+        if (saved) language = saved;
+        languageState = { language, toggled: false, streak: 0, saved, retry: null };
+      }
+      applyLanguage();
       show(document.getElementById("login-panel"), false);
       show(document.getElementById("session"), true);
       show(chatForm, true);
       addMenu();
+      if (languageState.toggled && languageState.saved !== language) saveLanguage(language);
+    }
+
+    // Save an explicit choice (POST /assistant/language). Never the same value twice; a failure
+    // keeps the language for the session and the next turn tries once more (server side).
+    async function saveLanguage(value) {
+      if (!token || !languageState) return;
+      if (languageState.saved === value) {
+        languageState.retry = null;
+        return;
+      }
+      const sentWith = token;
+      let res, data;
+      try {
+        res = await fetch("/assistant/language", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+          body: JSON.stringify({ language: value }),
+        });
+        data = await res.json().catch(() => ({}));
+      } catch (err) {
+        res = null;
+      }
+      if (token !== sentWith || !languageState) return;
+      if (res && res.status === 401) {
+        logout(data.reply || t("login_expired"));
+        return;
+      }
+      if (res && res.ok && data.status === "saved") {
+        if (languageState.language === value) {
+          languageState.saved = value;
+          languageState.retry = null;
+        }
+        addNotice(t("language_saved"));
+        return;
+      }
+      if (languageState.language === value) languageState.retry = value;
+      addNotice(t("language_not_saved"));
+    }
+
+    function toggleLanguage() {
+      language = language === "he" ? "en" : "he";
+      applyLanguage();
+      if (!token) {
+        chosenBeforeLogin = language;  // saved after login
+        return;
+      }
+      // A press applies at once, counts as "toggled" for this session and resets the row.
+      languageState.language = language;
+      languageState.toggled = true;
+      languageState.streak = 0;
+      saveLanguage(language);
+    }
+
+    // The server's answer to a turn: adopt its language state; a switch re-labels the page.
+    function adoptLanguage(data) {
+      if (!data.language_state) return;
+      languageState = data.language_state;
+      if (languageState.language !== language) {
+        language = languageState.language;
+        applyLanguage();
+      }
     }
 
     async function login(organizationId) {
@@ -259,12 +485,12 @@
         data = await res.json();
       } catch (err) {
         password.value = "";
-        loginError.textContent = "Could not reach the assistant server.";
+        loginError.textContent = t("assistant_unreachable");
         show(loginError, true);
         return;
       }
       if (res.ok && data.status === "logged_in") {
-        loggedIn(data.access_token);
+        loggedIn(data.access_token, data.language);
         return;
       }
       if (res.ok && data.status === "choose_organization") {
@@ -283,28 +509,29 @@
       password.value = "";
       show(orgChoice, false);
       show(loginForm, true);
-      loginError.textContent = LOGIN_ERRORS[data.status] || ("Login failed (" + (data.status || res.status) + ").");
+      loginError.textContent = TEXT[language].login[data.status] || t("login_failed", { status: data.status || res.status });
       show(loginError, true);
     }
 
     loginForm.addEventListener("submit", (e) => { e.preventDefault(); login(); });
     document.getElementById("logout").addEventListener("click", () => logout());
+    document.getElementById("language-toggle").addEventListener("click", () => toggleLanguage());
 
     function addMenu() {
-      const div = el("div", "msg bot");
-      div.appendChild(el("div", "text", "What do you want to do? / מה תרצו לעשות?"));
+      const div = botBubble();
+      div.appendChild(el("div", "text", t("menu")));
       const choices = el("div", "choices");
-      const create = el("button", null, "Create a contact / יצירת איש קשר");
+      const create = el("button", null, t("menu_create"));
       create.type = "button";
       create.addEventListener("click", () => choose("create_contact", create.textContent));
-      const update = el("button", null, "Update a contact / עדכון איש קשר");
+      const update = el("button", null, t("menu_update"));
       update.type = "button";
       update.disabled = true;  // not built: never calls anything
-      update.appendChild(el("span", "soon", "coming later / בקרוב"));
-      const ask = el("button", null, "Ask a question / שאלה");
+      update.appendChild(el("span", "soon", t("soon")));
+      const ask = el("button", null, t("menu_ask"));
       ask.type = "button";
       ask.addEventListener("click", () => choose("ask_question", ask.textContent));
-      const apartment = el("button", null, "Edit an apartment / עריכת דירה");
+      const apartment = el("button", null, t("menu_apartment"));
       apartment.type = "button";
       apartment.addEventListener("click", () => choose("edit_apartment", apartment.textContent));
       choices.append(create, update, apartment, ask);
@@ -318,21 +545,20 @@
       clearConversation();
       intent = newIntent;
       addUser(label);
-      sendTurn("");
+      sendTurn("");  // a menu choice is never counted for the language
     }
 
     function addConversationReply(data) {
-      const div = el("div", "msg bot");
+      const div = botBubble();
       div.appendChild(el("div", "text", data.reply));
       const s = data.state;
       const waiting = data.awaiting_confirmation || (s && s.pending && s.pending.uncertain) || (s && s.restart_offered);
       if (waiting) {
-        const he = s && s.language === "he";
         const choices = el("div", "choices");
-        const yes = el("button", null, he ? "כן" : "yes");
+        const yes = el("button", null, t("yes"));
         yes.type = "button";
         yes.addEventListener("click", () => { addUser(yes.textContent); sendTurn(yes.textContent); });
-        const no = el("button", null, he ? "לא" : "no");
+        const no = el("button", null, t("no"));
         no.type = "button";
         no.addEventListener("click", () => { addUser(no.textContent); sendTurn(no.textContent); });
         choices.append(yes, no);
@@ -352,9 +578,7 @@
     function addApartmentReply(data) {
       // Earlier steps' buttons no longer apply: a stale pick must never be sent.
       log.querySelectorAll(".apt-choices button, .apt-choices input, input.apt-choices").forEach(n => { n.disabled = true; });
-      const div = el("div", "msg bot");
-      const he = data.state && data.state.language === "he";
-      div.dir = he ? "rtl" : "ltr";
+      const div = botBubble();
       const choices = data.choices || [];
       // With buttons the numbered list is shown once, as the buttons; the full text is in data.reply.
       div.appendChild(el("div", "text", choices.length && data.prompt ? data.prompt : data.reply));
@@ -363,7 +587,7 @@
         // Typing narrows a long list; the numbers stay the CRM list's numbers.
         const filter = document.createElement("input");
         filter.className = "filter apt-choices";
-        filter.placeholder = he ? "סינון..." : "Filter...";
+        filter.placeholder = t("filter");
         filter.setAttribute("aria-label", filter.placeholder);
         filter.addEventListener("input", () => {
           const wanted = filter.value.trim().toLowerCase();
@@ -382,7 +606,7 @@
           box.appendChild(label);
           return check;
         });
-        const save = el("button", null, he ? "שמירה" : "Save");
+        const save = el("button", null, t("save"));
         save.type = "button";
         save.addEventListener("click", () => {
           const picked = boxes.filter(b => b.checked).map(b => b.value);
@@ -410,7 +634,7 @@
       }
       if (data.awaiting_check) {
         const row = el("div", "choices apt-choices");
-        [he ? "כן" : "yes", he ? "לא" : "no"].forEach(word => {
+        [t("yes"), t("no")].forEach(word => {
           const b = el("button", null, word);
           b.type = "button";
           b.addEventListener("click", () => tap(word, word));
@@ -437,7 +661,7 @@
       const headers = { "Content-Type": "application/json" };
       // Every intent needs the login now: the server checks it with the CRM first.
       headers["Authorization"] = "Bearer " + token;
-      const body = { intent, message, language };
+      const body = { intent, message, language, language_state: languageState };
       if (intent === "create_contact" && conversation) body.state = conversation;
       if (intent === "edit_apartment" && apartmentState) body.apartment_state = apartmentState;
       try {
@@ -445,20 +669,21 @@
         if (token !== sentWith) return;  // logged out or another login meanwhile: drop the answer
         if (res.status === 401) {
           const data = await res.json().catch(() => ({}));
-          logout(data.reply || "Your CRM login is no longer valid. Please log in again.");
+          logout(data.reply || t("login_expired"));
           return;
         }
         if ([400, 403, 429, 503].includes(res.status)) {
           // Not a login problem: show the server's message and keep the session.
           const data = await res.json().catch(() => ({}));
-          addRequestError(data.reply || ("The server returned HTTP " + res.status + "."));
+          addRequestError(data.reply || t("http_error", { status: res.status }));
           return;
         }
         if (!res.ok) {
-          addRequestError("The server returned HTTP " + res.status + ".");
+          addRequestError(t("http_error", { status: res.status }));
           return;
         }
         const data = await res.json();
+        adoptLanguage(data);  // before drawing: the reply is already in the new language
         if (data.intent === "ask_question" && data.outcome === "answered") {
           addBot(data);
         } else if (data.intent === "edit_apartment") {
@@ -472,12 +697,13 @@
         } else {
           addConversationReply(data);
         }
+        if (data.language_notice) addNotice(data.language_notice);
         if (data.show_menu) {
           clearConversation();
           addMenu();
         }
       } catch (err) {
-        addRequestError("Could not reach the server (" + err + ").");
+        addRequestError(t("server_unreachable", { error: err }));
       }
     }
 
@@ -488,12 +714,14 @@
       addUser(message);
       input.value = "";
       if (!intent) {
-        addConversationReply({ reply: "Please choose from the menu first. / אנא בחרו קודם מהתפריט." });
+        addConversationReply({ reply: t("choose_first") });
         addMenu();
         return;
       }
       sendTurn(message);
     });
+
+    applyLanguage();
   </script>
 </body>
 </html>

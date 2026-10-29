@@ -22,7 +22,6 @@ shown is exactly the CRM's draft and each CRM code has one known meaning.
 """
 
 import os
-import re
 import string
 from typing import Literal, Optional
 
@@ -89,8 +88,6 @@ NO_WORDS = {
 SKIP_WORDS = {"skip", "none", "no phone", "no email", "no address", "דלג", "אין", "בלי"}
 
 PUNCTUATION = str.maketrans("", "", string.punctuation + "״׳!?.,")
-HEBREW = re.compile(r"[֐-׿]")
-LATIN = re.compile(r"[A-Za-z]")
 
 
 def _normalized(text: str) -> str:
@@ -107,16 +104,6 @@ def is_explicit_no(text: str) -> bool:
 
 def is_skip(text: str) -> bool:
     return _normalized(text) in SKIP_WORDS
-
-
-def detect_language(text: str, current: str, single_answer: bool) -> str:
-    """Hebrew letters -> he; Latin letters -> en. A bare answer to one asked
-    field ("Levi", a phone number, an email) keeps the current language."""
-    if HEBREW.search(text):
-        return "he"
-    if LATIN.search(text) and not single_answer:
-        return "en"
-    return current
 
 
 # --- wording -----------------------------------------------------------------
@@ -282,10 +269,11 @@ def start(language: str) -> dict:
     return _answer(state, "started", say(language, "start"))
 
 
-def handle_turn(token: str, message: str, state: ConversationState) -> dict:
+def handle_turn(token: str, message: str, state: ConversationState, observe=None) -> dict:
+    """`observe(text, field values)` (app/language.py, passed by the route) sees each free message
+    once its field values are known and returns the session language; confirm, cancel and skip
+    words are never shown to it. The language is the session's: this module never guesses it."""
     text = message.strip()
-    single_answer = len(state.asked) == 1
-    state.language = detect_language(text, state.language, single_answer)
     lang = state.language
     pending = state.pending
 
@@ -303,7 +291,9 @@ def handle_turn(token: str, message: str, state: ConversationState) -> dict:
         if pending.uncertain:
             # Never a new proposal while the last save is unknown.
             return _answer(state, "uncertain", say(lang, "uncertain_waiting"))
-        if not _apply_message(text, state):
+        changed = _read_message(text, state, observe)
+        lang = state.language
+        if not changed:
             return _answer(state, "awaiting_confirmation", say(lang, "ambiguous"))
         state.pending = None  # the details changed: the old proposal is dropped, a fresh yes is needed
         return _propose(token, state)
@@ -323,13 +313,21 @@ def handle_turn(token: str, message: str, state: ConversationState) -> dict:
             setattr(state.fields, name, None)
         return _propose(token, state)
 
-    if not _apply_message(text, state):
+    if not _read_message(text, state, observe):
         return _answer(state, "needs_information", _ask_text(state, not_understood=True))
     return _propose(token, state)
 
 
-def _apply_message(text: str, state: ConversationState) -> bool:
-    """Read fields from the message into state.fields. True if any field changed."""
+def _read_message(text: str, state: ConversationState, observe) -> bool:
+    """Read the fields, then let the session language see the message without them."""
+    changed, values = _apply_message(text, state)
+    if observe is not None:
+        state.language = observe(text, values)
+    return changed
+
+
+def _apply_message(text: str, state: ConversationState) -> tuple[bool, list[str]]:
+    """Read fields from the message into state.fields: (any field changed, the values read)."""
     extraction = field_extraction.extract_fields(text, list(state.asked))
     if extraction.status == "ok":
         found = extraction.fields
@@ -343,7 +341,7 @@ def _apply_message(text: str, state: ConversationState) -> bool:
         if getattr(state.fields, name) != value:
             setattr(state.fields, name, value)
             changed = True
-    return changed
+    return changed, [v for v in found.values() if isinstance(v, str)]
 
 
 def _missing_required(state: ConversationState) -> list[str]:

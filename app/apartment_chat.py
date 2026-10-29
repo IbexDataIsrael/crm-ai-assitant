@@ -47,7 +47,7 @@ from typing import Any, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
 
 from app import crm_api
-from app.contact_chat import detect_language, is_explicit_no, is_explicit_yes
+from app.contact_chat import is_explicit_no, is_explicit_yes
 
 Language = Literal["en", "he"]
 Step = Literal["address", "choose_apartment", "choose_field", "choose_value", "confirm", "blocked"]
@@ -402,7 +402,6 @@ def start(language: str) -> dict:
 
 def handle_turn(token: str, message: str, state: ApartmentEditState) -> dict:
     text = message.strip()
-    state.language = detect_language(text, state.language, single_answer=state.step != "address")
     lang = state.language
 
     if state.step == "blocked":

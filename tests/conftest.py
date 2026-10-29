@@ -1,6 +1,7 @@
 """Shared test setup: tests never see a real key and can never call Gemini,
 and they use their own database and login role, never the app's."""
 
+import json
 import os
 from pathlib import Path
 
@@ -193,8 +194,28 @@ class FakeCRM:
         self.requests = []
         self.me_answers = []
         self.me_requests = []
+        # GET/PUT /api/preferences (the user's language): answered from pref_answers if a
+        # test queued any, otherwise GET -> pref_map and PUT -> stored and echoed.
+        self.pref_map = {}
+        self.pref_answers = []
+        self.pref_requests = []
+
+    def puts(self):
+        """The language saves sent, as their JSON bodies."""
+        return [json.loads(r.content) for r in self.pref_requests if r.method == "PUT"]
 
     def handler(self, request):
+        if request.url.path == crm_api.PREFERENCES_PATH:
+            self.pref_requests.append(request)
+            if self.pref_answers:
+                answer = self.pref_answers.pop(0)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+            if request.method == "PUT":
+                body = json.loads(request.content)
+                self.pref_map[body["key"]] = body["value"]
+            return httpx.Response(200, json=self.pref_map)
         if request.url.path == crm_api.ME_PATH:
             self.me_requests.append(request)
             if not self.me_answers:

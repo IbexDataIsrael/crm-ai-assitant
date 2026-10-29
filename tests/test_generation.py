@@ -3,6 +3,7 @@
 import weakref
 
 import httpx
+import pytest
 from google.genai import errors
 from google.genai._gaos.lib import compat_errors
 
@@ -52,11 +53,14 @@ MIXED_PASSAGES = [
 ]
 
 
-def test_instruction_says_question_language_wins_over_source_language():
-    instruction = generation.SYSTEM_INSTRUCTION
-    assert "language of the question, even when some or all passages are in another language" in instruction
-    assert "The language of the passages never decides the language of the answer." in instruction
-    assert "translate it into the question's language" in instruction
+@pytest.mark.parametrize("language, name", [("en", "English"), ("he", "Hebrew")])
+def test_instruction_names_the_users_language_explicitly(language, name):
+    # docs/instructions19.md: the user's language, not the question's, decides the answer's language.
+    instruction = generation.system_instruction(language)
+    assert f"Write the answer in {name}." in instruction
+    assert f"whatever the language of the question or of the passages" in instruction
+    assert f"translate it into {name}" in instruction
+    assert "language of the question, even" not in instruction
     assert "Keep proper nouns" in instruction
     assert "Keep the passage numbers exactly as given, also for passages you translated." in instruction
     # The marker the code looks for must stay untranslated.
@@ -68,9 +72,11 @@ def test_instruction_says_question_language_wins_over_source_language():
 def test_mixed_language_passages_are_sent_unchanged_with_the_language_rule(fake_gemini):
     question = "What is Jewish Points and what does it track?"
     fake_gemini.reply = FakeInteraction("Jewish Points is a bilingual CRM [1][3].")
-    result = generation.generate_answer(question, MIXED_PASSAGES)
+    result = generation.generate_answer(question, MIXED_PASSAGES, language="he")
     request = fake_gemini.requests[0]
-    assert request["system_instruction"] == generation.SYSTEM_INSTRUCTION
+    # An English question in a Hebrew session: the answer is asked for in Hebrew.
+    assert request["system_instruction"] == generation.system_instruction("he")
+    assert "Write the answer in Hebrew." in request["system_instruction"]
     sent = request["input"]
     assert sent.startswith(f"Question: {question}")
     # Sources keep their original language; nothing is translated before sending.

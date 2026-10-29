@@ -8,7 +8,9 @@ import pytest
 from fastapi.testclient import TestClient
 from google.genai import errors
 
-from app.knowledge import ACTIVE_DOCUMENTS, RETRIEVAL_LABEL
+from app.knowledge import ACTIVE_DOCUMENTS, TEXTS
+
+RETRIEVAL_LABEL = TEXTS["en"]["retrieval"]
 from app.main import app
 from tests.conftest import TEST_AUTH, FakeInteraction
 

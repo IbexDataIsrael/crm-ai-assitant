@@ -38,6 +38,10 @@ MAX_MESSAGE_LENGTH = 200
 LOGIN_PATH = "/api/auth/token"
 # The CRM's "who am I" (backend/app/routers/auth.py me()); used to check a login.
 ME_PATH = "/api/auth/me"
+# sheepsidebay_crm backend/app/routers/preferences.py (fixes116): per-user preferences;
+# the assistant reads and writes only the "locale" key ("he" or "en").
+PREFERENCES_PATH = "/api/preferences"
+LOCALES = ("he", "en")
 UNAVAILABLE_MESSAGE = "The service is temporarily unavailable. Please try again in a moment."
 # The CRM's 403 login codes (auth.py auth_error) -> what the chat page shows.
 LOGIN_REFUSALS = {
@@ -240,7 +244,9 @@ def login(username: str, password: str, organization_id: int | None = None) -> B
                 return BridgeResult(200, {"status": "choose_organization", "organizations": organizations})
         token = data.get("access_token")
         if isinstance(token, str) and token:
-            return BridgeResult(200, {"status": "logged_in", "access_token": token})
+            # The user's language (or None); login succeeds either way.
+            return BridgeResult(200, {"status": "logged_in", "access_token": token,
+                                      "language": read_language(token)})
         return _failure(502, "crm_contract_error", "The CRM's login answer had no token.")
     return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {code}).")
 
@@ -516,3 +522,53 @@ def update_apartment_field(token: str, apartment_id: int, field_key: str, value)
         })
     # A 2xx we cannot read: the CRM may have saved, so do not claim either way.
     return _failure(502, "uncertain", uncertain_message)
+
+
+# --- The user's language (docs/instructions19.md) ------------------------------
+# The CRM's preference "locale" is the only stored copy. Only that key is read
+# or written; the rest of the preference map never leaves this module.
+
+def read_language(token: str) -> str | None:
+    """The CRM's locale for this user: "he", "en", or None (unset, odd value, or any failure)."""
+    try:
+        base_url = crm_base_url()
+        with make_http_client(base_url) as client:
+            response = client.get(PREFERENCES_PATH, headers={"Authorization": f"Bearer {token}"})
+    except (CRMConfigError, httpx.HTTPError) as error:
+        logger.warning("CRM preferences read failed: %s", type(error).__name__)
+        return None
+    if response.status_code != 200:
+        logger.warning("CRM preferences read answer: HTTP %s", response.status_code)
+        return None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    locale = data.get("locale") if isinstance(data, dict) else None
+    return locale if locale in LOCALES else None
+
+
+def save_language(token: str, language: str) -> BridgeResult:
+    """PUT {"key": "locale", "value": language}. 200 {"status": "saved", "language"} or a failure."""
+    if language not in LOCALES:
+        return _failure(400, "invalid_language", "The language must be he or en.")
+    try:
+        base_url = crm_base_url()
+        with make_http_client(base_url) as client:
+            response = client.put(PREFERENCES_PATH, json={"key": "locale", "value": language},
+                                  headers={"Authorization": f"Bearer {token}"})
+    except CRMConfigError as error:
+        return _failure(503, "crm_not_configured", str(error))
+    except httpx.TimeoutException:
+        logger.warning("CRM language save timed out")
+        return _failure(504, "crm_timeout", "The CRM did not answer in time.")
+    except httpx.HTTPError as error:
+        logger.warning("CRM language save failed: %s", type(error).__name__)
+        return _failure(502, "crm_unreachable", "Could not reach the CRM.")
+    code = response.status_code
+    if code == 401:
+        return _failure(401, "unauthorized", "The CRM did not accept the bearer token.")
+    if code != 200:
+        logger.warning("CRM language save answer: HTTP %s", code)
+        return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {code}).")
+    return BridgeResult(200, {"status": "saved", "language": language})

@@ -17,7 +17,6 @@ from app.generation import GenerationResult
 from app.vectorstore import VectorStore
 
 KNOWLEDGE_DIR = Path(__file__).resolve().parent.parent / "knowledge"
-RETRIEVAL_LABEL = "Local semantic retrieval - source passages"
 # The reviewed user guides (English and Hebrew) are the only searchable
 # documents. Startup fails if one is missing; any other file in knowledge/ is
 # skipped and logged.
@@ -45,28 +44,60 @@ def search(message: str, k: int = TOP_K) -> list[dict]:
     ]
 
 
-def answer_header(generation: GenerationResult) -> list[str]:
+# The assistant's own wording, by the user's language. Passage text, filenames and
+# headings are guide content and are shown as they are; a provider's technical
+# error detail ({error}) stays as the provider wrote it.
+TEXTS = {
+    "en": {
+        "answered": "AI-generated answer ({provider}, {model}) - based only on the passages below:",
+        "cited": "Cited: {cited}",
+        "insufficient": "No answer: {provider} ({model}) found that the passages below don't answer this question.",
+        "no_api_key": "No AI-written answer: answer generation is off because {error}.",
+        "failed": "No AI-written answer: answer generation failed ({error}).",
+        "retrieval": "Local semantic retrieval - source passages:",
+        "too_long": "Note: your question is longer than {max_tokens} tokens; only the start was used for search.",
+        "passage": "[{number}] {filename} - {heading} (similarity {score:.2f})",
+        "sources": "Sources: {sources}",
+    },
+    "he": {
+        "answered": "תשובה שנכתבה ב-AI ({provider}, {model}) - מבוססת רק על הקטעים שלהלן:",
+        "cited": "צוטטו: {cited}",
+        "insufficient": "אין תשובה: {provider} ({model}) מצא שהקטעים שלהלן אינם עונים על השאלה.",
+        "no_api_key": "אין תשובה שנכתבה ב-AI: יצירת התשובות כבויה ({error}).",
+        "failed": "אין תשובה שנכתבה ב-AI: יצירת התשובה נכשלה ({error}).",
+        "retrieval": "חיפוש סמנטי מקומי - קטעי מקור:",
+        "too_long": "שימו לב: השאלה ארוכה מ-{max_tokens} טוקנים; רק תחילתה שימשה לחיפוש.",
+        "passage": "[{number}] {filename} - {heading} (דמיון {score:.2f})",
+        "sources": "מקורות: {sources}",
+    },
+}
+
+
+def answer_header(generation: GenerationResult, language: str = "en") -> list[str]:
     """The top of the reply: the answer, or a plain statement of why there is none."""
+    texts = TEXTS[language]
     if generation.status == "answered":
         cited = "; ".join(f"[{c['number']}] {c['filename']} > {c['heading']}" for c in generation.citations)
         return [
-            f"AI-generated answer ({generation.provider}, {generation.model}) - based only on the passages below:",
+            texts["answered"].format(provider=generation.provider, model=generation.model),
             generation.answer,
-            f"Cited: {cited}",
+            texts["cited"].format(cited=cited),
         ]
     if generation.status == "insufficient_sources":
-        return [f"No answer: {generation.provider} ({generation.model}) found that the passages below don't answer this question."]
+        return [texts["insufficient"].format(provider=generation.provider, model=generation.model)]
     if generation.status == "no_api_key":
-        return [f"No AI-written answer: answer generation is off because {generation.error}."]
-    return [f"No AI-written answer: answer generation failed ({generation.error})."]
+        return [texts["no_api_key"].format(error=generation.error)]
+    return [texts["failed"].format(error=generation.error)]
 
 
-def format_reply(message: str, passages: list[dict], generation: GenerationResult) -> str:
-    lines = answer_header(generation) + ["", RETRIEVAL_LABEL + ":", ""]
+def format_reply(message: str, passages: list[dict], generation: GenerationResult, language: str = "en") -> str:
+    texts = TEXTS[language]
+    lines = answer_header(generation, language) + ["", texts["retrieval"], ""]
     embedder = get_embedder()
     if embedder.count_tokens(message) > embedder.max_tokens:
-        lines += [f"Note: your question is longer than {embedder.max_tokens} tokens; only the start was used for search.", ""]
+        lines += [texts["too_long"].format(max_tokens=embedder.max_tokens), ""]
     for i, p in enumerate(passages, 1):
-        lines += [f"[{i}] {p['filename']} - {p['heading']} (similarity {p['score']:.2f})", p["text"], ""]
-    lines.append("Sources: " + "; ".join(f"{p['filename']} > {p['heading']}" for p in passages))
+        lines += [texts["passage"].format(number=i, filename=p["filename"], heading=p["heading"], score=p["score"]),
+                  p["text"], ""]
+    lines.append(texts["sources"].format(sources="; ".join(f"{p['filename']} > {p['heading']}" for p in passages)))
     return "\n".join(lines)
