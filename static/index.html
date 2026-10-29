@@ -39,13 +39,17 @@
     .live { color: #8a4b00; font-weight: bold; }
     .multi { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
     .multi label { display: flex; gap: 8px; align-items: center; font-size: 18px; }
+    /* Long lists (floors, report numbers): one per line, scrolling, with a filter box. */
+    .long { flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 320px; overflow-y: auto; }
+    .long button { text-align: start; }
+    .filter { margin-top: 8px; width: 100%; box-sizing: border-box; }
   </style>
 </head>
 <body>
   <h1>CRM Assistant</h1>
   <p class="demo">Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. Typed "find" / "update" commands still return demo data.</p>
   <p class="live">Create a contact talks to the real CRM at CRM_API_URL: a draft you confirm with "yes" is saved there as a real record.
-    Edit an apartment also talks to the real CRM: the value you pick is saved there right away.</p>
+    Edit an apartment also talks to the real CRM: a change you confirm with "yes" is saved there.</p>
 
   <section id="login-panel" class="panel">
     <form id="login-form">
@@ -347,13 +351,28 @@
 
     function addApartmentReply(data) {
       // Earlier steps' buttons no longer apply: a stale pick must never be sent.
-      log.querySelectorAll(".apt-choices button, .apt-choices input").forEach(n => { n.disabled = true; });
+      log.querySelectorAll(".apt-choices button, .apt-choices input, input.apt-choices").forEach(n => { n.disabled = true; });
       const div = el("div", "msg bot");
-      div.appendChild(el("div", "text", data.reply));
       const he = data.state && data.state.language === "he";
+      div.dir = he ? "rtl" : "ltr";
       const choices = data.choices || [];
+      // With buttons the numbered list is shown once, as the buttons; the full text is in data.reply.
+      div.appendChild(el("div", "text", choices.length && data.prompt ? data.prompt : data.reply));
+      const long = choices.length > 8;
+      function addFilter(box, items) {
+        // Typing narrows a long list; the numbers stay the CRM list's numbers.
+        const filter = document.createElement("input");
+        filter.className = "filter apt-choices";
+        filter.placeholder = he ? "סינון..." : "Filter...";
+        filter.setAttribute("aria-label", filter.placeholder);
+        filter.addEventListener("input", () => {
+          const wanted = filter.value.trim().toLowerCase();
+          items.forEach(n => n.classList.toggle("hidden", !!wanted && !n.textContent.toLowerCase().includes(wanted)));
+        });
+        div.insertBefore(filter, box);
+      }
       if (data.multi && choices.length) {
-        const box = el("div", "multi apt-choices");
+        const box = el("div", "multi apt-choices" + (long ? " long" : ""));
         const boxes = choices.map(c => {
           const label = el("label");
           const check = document.createElement("input");
@@ -367,21 +386,27 @@
         save.type = "button";
         save.addEventListener("click", () => {
           const picked = boxes.filter(b => b.checked).map(b => b.value);
-          const message = picked.length ? picked.join(",") : (he ? "ללא" : "none");
           const labels = boxes.filter(b => b.checked).map(b => b.parentNode.textContent);
-          tap(labels.length ? labels.join(", ") : message, message);
+          // Nothing ticked = clear the list, only through the server's clear button.
+          if (picked.length) tap(labels.join(", "), picked.join(","));
+          else if (data.clear) tap(data.clear.label, data.clear.message);
         });
-        box.appendChild(save);
         div.appendChild(box);
+        if (long) addFilter(box, boxes.map(b => b.parentNode));
+        const saveRow = el("div", "choices apt-choices");
+        saveRow.appendChild(save);
+        div.appendChild(saveRow);
       } else if (choices.length) {
-        const row = el("div", "choices apt-choices");
-        choices.forEach(c => {
+        const row = el("div", "choices apt-choices" + (long ? " long" : ""));
+        const buttons = choices.map(c => {
           const b = el("button", null, c.label);
           b.type = "button";
           b.addEventListener("click", () => tap(c.label, c.message));
           row.appendChild(b);
+          return b;
         });
         div.appendChild(row);
+        if (long) addFilter(row, buttons);
       }
       if (data.awaiting_check) {
         const row = el("div", "choices apt-choices");

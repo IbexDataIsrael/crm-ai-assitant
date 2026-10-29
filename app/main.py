@@ -372,7 +372,7 @@ def assistant_turn(
         return {"intent": "ask_question", "outcome": "answered", **answer_message(request.message)}
 
     if request.intent == "edit_apartment":
-        # sheepsidebay_crm docs/fixes114.md: behind the same login check above.
+        # sheepsidebay_crm docs/fixes115.md: behind the same login check above.
         if not request.message.strip():
             return apartment_chat.start(language)
         state = request.apartment_state or ApartmentEditState(language=language)

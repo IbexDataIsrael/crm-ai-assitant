@@ -360,14 +360,17 @@ def confirm_proposal(token: str, proposal_id: str, payload_hash: str, fields: di
     return _failure(502, "uncertain", uncertain_message, **retry)
 
 
-# --- Apartment edit (docs: sheepsidebay_crm docs/fixes114.md) -----------------
-# The CRM's GET /api/assistant/apartments/fields, /search, /by-lineage/{id} and
-# POST /{id}/update (backend/app/routers/assistant_apartments.py). Same rules as
-# the contact bridge: the user's token only, to CRM_API_URL only, no redirects.
-# Reads are safe to repeat. An update whose answer is lost is "uncertain" and
-# is NEVER resent by this module: the caller re-reads the lineage instead.
+# --- Apartment edit (sheepsidebay_crm docs/fixes115.md) ------------------------
+# The CRM's GET /api/assistant/apartments/search, /by-lineage/{id} and
+# POST /{id}/update (backend/app/routers/assistant_apartments.py). Every
+# apartment comes with its `editable_fields`, decided by the CRM per user and
+# apartment. Same rules as the contact bridge: the user's token only, to
+# CRM_API_URL only, no redirects. Reads are safe to repeat. An update whose
+# answer is lost is "uncertain" and is NEVER resent by this module: the caller
+# re-reads the lineage instead.
 
 APARTMENTS_PATH = "/api/assistant/apartments"
+OPTION_KINDS = ("single_option", "multi_option")
 
 
 def _get(path: str, token: str, params: dict | None = None) -> httpx.Response:
@@ -380,10 +383,41 @@ def _is_id(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def _is_label(value) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_option(option) -> bool:
+    """value is a string, or a number (report numbers); labels may be missing."""
+    if not isinstance(option, dict):
+        return False
+    value = option.get("value")
+    return ((isinstance(value, str) or _is_int(value))
+            and _is_label(option.get("label")) and _is_label(option.get("label_en")))
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_editable_field(entry) -> bool:
+    """One editable_fields entry. The kind is only checked to be a string: a kind
+    the chat doesn't know is left out by the conversation, not an error here."""
+    if not (isinstance(entry, dict) and isinstance(entry.get("field_key"), str) and entry["field_key"]
+            and isinstance(entry.get("kind"), str)
+            and _is_label(entry.get("label")) and _is_label(entry.get("label_en"))):
+        return False
+    options = entry.get("options")
+    if entry["kind"] in OPTION_KINDS:
+        return isinstance(options, list) and all(_is_option(o) for o in options)
+    return options is None or (isinstance(options, list) and all(_is_option(o) for o in options))
+
+
 def _is_apartment(data) -> bool:
-    """The fields of a CRM apartment summary that the chat relies on."""
+    """The fields of a CRM apartment result that the chat relies on."""
     return (isinstance(data, dict) and _is_id(data.get("apartment_id")) and _is_id(data.get("lineage_id"))
-            and isinstance(data.get("language"), list))
+            and isinstance(data.get("editable_fields"), list)
+            and all(_is_editable_field(f) for f in data["editable_fields"]))
 
 
 def _read(path: str, token: str, params: dict | None = None) -> tuple[BridgeResult | None, object]:
@@ -414,25 +448,6 @@ def _read(path: str, token: str, params: dict | None = None) -> tuple[BridgeResu
     return None, data
 
 
-def _is_option(option) -> bool:
-    return isinstance(option, dict) and all(isinstance(option.get(k), str) for k in ("value", "label_he", "label_en"))
-
-
-def apartment_fields(token: str) -> BridgeResult:
-    """The fields this user may edit, each with its options (admin-controlled in the CRM)."""
-    failure, data = _read(f"{APARTMENTS_PATH}/fields", token)
-    if failure:
-        return failure
-    fields = data.get("fields") if isinstance(data, dict) else None
-    if not isinstance(fields, list) or not all(
-        isinstance(f, dict) and isinstance(f.get("field"), str) and f.get("type") in ("single", "multi")
-        and isinstance(f.get("options"), list) and all(_is_option(o) for o in f["options"])
-        for f in fields
-    ):
-        return _failure(502, "crm_contract_error", "The CRM's field list had an unexpected shape.")
-    return BridgeResult(200, {"status": "ok", "fields": fields})
-
-
 def search_apartments(token: str, query: str) -> BridgeResult:
     failure, data = _read(f"{APARTMENTS_PATH}/search", token, {"q": query})
     if failure:
@@ -455,15 +470,15 @@ def apartment_by_lineage(token: str, lineage_id: int) -> BridgeResult:
     return BridgeResult(200, {"status": "ok", "apartment": data})
 
 
-def update_apartment_field(token: str, apartment_id: int, field: str, value) -> BridgeResult:
+def update_apartment_field(token: str, apartment_id: int, field_key: str, value) -> BridgeResult:
     """One field of one apartment version. "updated"/"unchanged" come only from the
-    CRM's success answer, with the state the CRM read back after saving."""
+    CRM's success answer, with the value and the apartment the CRM read back."""
     if not _is_id(apartment_id):
         return _failure(404, "not_found", "No such apartment for this user.")
     uncertain_message = ("The CRM's answer was lost, so it is not known whether the change was saved. "
                          "It was not resent; read the apartment again to find out.")
     try:
-        response = _send(f"{APARTMENTS_PATH}/{apartment_id}/update", token, {"field": field, "value": value})
+        response = _send(f"{APARTMENTS_PATH}/{apartment_id}/update", token, {"field_key": field_key, "value": value})
     except CRMConfigError as error:
         return _failure(503, "crm_not_configured", str(error))
     except (httpx.ConnectError, httpx.ConnectTimeout):
@@ -489,10 +504,12 @@ def update_apartment_field(token: str, apartment_id: int, field: str, value) -> 
     except ValueError:
         data = None
     if (code == 200 and isinstance(data, dict) and data.get("status") in ("updated", "unchanged")
-            and _is_apartment(data.get("apartment"))):
+            and _is_id(data.get("apartment_id")) and _is_apartment(data.get("apartment"))):
         return BridgeResult(200, {
             "status": data["status"],
-            "apartment_id": data.get("apartment_id"),
+            "field_key": data.get("field_key"),
+            "value": data.get("value"),
+            "apartment_id": data["apartment_id"],
             "previous_apartment_id": data.get("previous_apartment_id"),
             "lineage_id": data.get("lineage_id"),
             "apartment": data["apartment"],
