@@ -14,11 +14,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import apartment_chat, contact_chat, crm, crm_api, generation, knowledge, language as user_language
-from app import planner, rate_limit
+from app import apartment_chat, contact_chat, crm, crm_api, generation, knowledge
+from app import planner, rate_limit, search_chat
 from app.apartment_chat import ApartmentEditState
 from app.contact_chat import ContactDraftFields, ConversationState
-from app.language import LanguageState
+from app.search_chat import SearchState
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
@@ -49,7 +49,7 @@ app = FastAPI(
 
 class ChatRequest(BaseModel):
     message: str
-    # The user's language (docs/instructions19.md); replies and the answer follow it.
+    # The user's CRM interface language (docs/instructions20.md); replies and the answer follow it.
     language: Optional[Literal["en", "he"]] = None
 
 
@@ -115,21 +115,29 @@ def _rate_limited(http_request: Request, group: str, language: str = "en") -> Op
 
 def _require_login(http_request: Request, credentials: Optional[HTTPAuthorizationCredentials],
                    language: str = "en", **extra) -> tuple[Optional[str], Optional[JSONResponse]]:
-    """(token, None) when the CRM confirms the login; (None, refusal) otherwise.
+    """(token, None) when the CRM confirms the login; (None, refusal) otherwise."""
+    token, _, refusal = _require_login_with_role(http_request, credentials, language, **extra)
+    return token, refusal
+
+
+def _require_login_with_role(http_request: Request, credentials: Optional[HTTPAuthorizationCredentials],
+                             language: str = "en", **extra):
+    """(token, role, None) when the CRM confirms the login; (None, None, refusal) otherwise.
 
     Order: rate limit, then the token's presence, then the CRM check - so a
-    refused request costs no CRM call and no AI work.
+    refused request costs no CRM call and no AI work. The role is the CRM's answer
+    from that same check (GET /api/auth/me), never anything the client sent.
     """
     refusal = _rate_limited(http_request, "chat", language)
     if refusal is not None:
-        return None, refusal
+        return None, None, refusal
     token = _bearer_token(credentials)
     if token is None:
-        return None, _gate_refusal("unauthorized", language, **extra)
+        return None, None, _gate_refusal("unauthorized", language, **extra)
     verdict = crm_api.verify_login(token)
     if verdict.http_status != 200:
-        return None, _gate_refusal(verdict.body["status"], language, **extra)
-    return token, None
+        return None, None, _gate_refusal(verdict.body["status"], language, **extra)
+    return token, verdict.body.get("role"), None
 
 
 @app.get("/")
@@ -365,17 +373,23 @@ ASK_A_QUESTION = {
 class TurnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Set by the menu choice, never read from free text.
-    intent: Literal["create_contact", "update_contact", "edit_apartment", "ask_question"]
-    # Empty when the menu choice was just made.
+    # search = the free-text box (docs/instructions20.md); the others continue a flow the
+    # page is in (a button tap or an earlier answer started it). Never read from free text.
+    intent: Literal["search", "open_person", "create_contact", "update_contact", "edit_apartment", "ask_question"]
+    # Empty when a flow was just started by a button.
     message: str = ""
+    # A record picked from the search results: a contact id (open_person) or an apartment's
+    # lineage id (edit_apartment). Only ever looked up through the CRM with the user's token.
+    open_id: Optional[int] = Field(default=None, gt=0)
+    # Held by the page between search turns (only: is an add offer waiting for a yes). No token.
+    search_state: Optional[SearchState] = None
     # Held by the page between turns (create_contact only). Contains no token.
     state: Optional[ConversationState] = None
     # Held by the page between turns (edit_apartment only). Contains no token.
     apartment_state: Optional[ApartmentEditState] = None
+    # The user's CRM interface language (preference "locale"), read by the page at login and
+    # when a remembered login is resumed (docs/instructions20.md). The assistant never changes it.
     language: Optional[Literal["en", "he"]] = None
-    # The session language and its detection state (app/language.py). Held by the page; no token.
-    language_state: Optional[LanguageState] = None
 
 
 @app.post("/assistant/turn")
@@ -386,100 +400,55 @@ def assistant_turn(
 ):
     """One step of the conversation. Every intent needs a login the CRM confirms
     first; the token then goes only to the CRM (login check and bridge)."""
-    held = request.apartment_state or request.state
-    session = request.language_state or LanguageState(
-        language=request.language or (held.language if held else "en"))
-    before = session.language
-    token, refusal = _require_login(http_request, credentials, session.language, intent=request.intent)
+    held = request.apartment_state or request.state or request.search_state
+    language = request.language or (held.language if held else "en")
+    token, role, refusal = _require_login_with_role(http_request, credentials, language, intent=request.intent)
     if refusal is not None:
         return refusal
-    answer = _turn(token, request, session)
-    # After the work: save a language change (or retry a failed save once). Never blocks the answer.
-    notice = user_language.settle(token, session, changed=session.language != before)
-    answer["language_state"] = session.model_dump()
-    answer["language_notice"] = user_language.notice(notice, session.language)
-    return answer
+    return _turn(token, role, request, language)
 
 
-def _turn(token: str, request: TurnRequest, session: LanguageState) -> dict:
-    """One turn in the session language. Only typed free text may change it (app/language.py):
-    an Ask question, or a free message in the contact flow (minus the field values read from it).
-    Menu choices (an empty message), button taps and every apartment-flow message never do."""
+def _turn(token: str, role: Optional[str], request: TurnRequest, language: str) -> dict:
+    """One turn in the user's CRM language. Nothing the user types changes it."""
     message = request.message
+
+    if request.intent == "search":
+        state = request.search_state or SearchState(language=language)
+        state.language = language
+        return search_chat.handle_turn(token, message, state, role)
+
+    if request.intent == "open_person":
+        if request.open_id is None:
+            return search_chat.handle_turn(token, "", SearchState(language=language), role)
+        return search_chat.open_person(language, request.open_id, role)
 
     if request.intent == "update_contact":
         # Not built: never calls the bridge or the CRM.
         return {"intent": "update_contact", "outcome": "not_available",
-                "reply": UPDATE_NOT_AVAILABLE[session.language], "show_menu": True}
+                "reply": UPDATE_NOT_AVAILABLE[language], "show_menu": True}
 
     if request.intent == "ask_question":
         if not message.strip():
-            return {"intent": "ask_question", "outcome": "ask", "reply": ASK_A_QUESTION[session.language]}
-        user_language.observe(session, message)
-        return {"intent": "ask_question", "outcome": "answered", **answer_message(message, session.language)}
+            return {"intent": "ask_question", "outcome": "ask", "reply": ASK_A_QUESTION[language]}
+        return {"intent": "ask_question", "outcome": "answered", **answer_message(message, language)}
 
     if request.intent == "edit_apartment":
-        # sheepsidebay_crm docs/fixes115.md: behind the same login check above. Every message
-        # here is an address, a pick, a field value or a confirm word: none changes the language.
+        # sheepsidebay_crm docs/fixes115.md: behind the same login check above.
+        if request.open_id is not None:  # picked from the search results
+            return apartment_chat.open_apartment(token, language, request.open_id)
         if not message.strip():
-            return apartment_chat.start(session.language)
-        state = request.apartment_state or ApartmentEditState(language=session.language)
-        state.language = session.language
+            return apartment_chat.start(language)
+        state = request.apartment_state or ApartmentEditState(language=language)
+        state.language = language
         return apartment_chat.handle_turn(token, message, state)
 
-    # create_contact.
+    # create_contact: only for the roles that may see people through the helper
+    # (the CRM checks its own permission again when the proposal is made).
+    if not search_chat.may_see_people(role):
+        return search_chat.start_add(language, role)
     if not message.strip():
-        return contact_chat.start(session.language)
-    state = request.state or ConversationState(language=session.language)
-    state.language = session.language
+        return contact_chat.start(language)
+    state = request.state or ConversationState(language=language)
+    state.language = language
+    return contact_chat.handle_turn(token, message, state)
 
-    def observe(text: str, values) -> str:
-        return user_language.observe(session, text, values).language
-
-    return contact_chat.handle_turn(token, message, state, observe=observe)
-
-
-# --- The user's language: the toggle's save (docs/instructions19.md) -------------
-
-INVALID_LANGUAGE = {
-    "en": "The language must be Hebrew or English.",
-    "he": "השפה צריכה להיות עברית או אנגלית.",
-}
-
-
-@app.post("/assistant/language")
-async def save_language(
-    http_request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(crm_bearer),
-):
-    """Save the user's language in the CRM (preference "locale"). Body {"language": "he" | "en"}.
-
-    Same rate limit group and login check as the chat; any other value -> 400, nothing called.
-    A failed save is an error here, but the page keeps the language for the session and the
-    next turn tries the save once more (app/language.py).
-    """
-    refusal = _rate_limited(http_request, "chat")
-    if refusal is not None:
-        return refusal
-    token = _bearer_token(credentials)
-    if token is None:
-        return _gate_refusal("unauthorized", "en")
-    try:
-        body = await http_request.json()
-    except ValueError:
-        body = None
-    wanted = body.get("language") if isinstance(body, dict) and set(body) == {"language"} else None
-    if wanted not in user_language.LANGUAGES:
-        return JSONResponse(status_code=400, headers=NO_STORE, content={
-            "status": "invalid_language", "reply": INVALID_LANGUAGE["en"] + " / " + INVALID_LANGUAGE["he"]})
-    verdict = await run_in_threadpool(crm_api.verify_login, token)
-    if verdict.http_status != 200:
-        return _gate_refusal(verdict.body["status"], wanted)
-    result = await run_in_threadpool(user_language.save, token, wanted)
-    if result.http_status == 200:
-        return JSONResponse(status_code=200, headers=NO_STORE, content={
-            "status": "saved", "language": wanted, "reply": user_language.notice("saved", wanted)})
-    if result.body.get("status") == "unauthorized":
-        return _gate_refusal("unauthorized", wanted)
-    return JSONResponse(status_code=502, headers=NO_STORE, content={
-        "status": "not_saved", "language": wanted, "reply": user_language.notice("save_failed", wanted)})

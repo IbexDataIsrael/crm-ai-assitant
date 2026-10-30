@@ -39,7 +39,7 @@ LOGIN_PATH = "/api/auth/token"
 # The CRM's "who am I" (backend/app/routers/auth.py me()); used to check a login.
 ME_PATH = "/api/auth/me"
 # sheepsidebay_crm backend/app/routers/preferences.py (fixes116): per-user preferences;
-# the assistant reads and writes only the "locale" key ("he" or "en").
+# the assistant only reads the "locale" key ("he" or "en") and never changes it (docs/instructions20.md).
 PREFERENCES_PATH = "/api/preferences"
 LOCALES = ("he", "en")
 UNAVAILABLE_MESSAGE = "The service is temporarily unavailable. Please try again in a moment."
@@ -82,6 +82,32 @@ def crm_base_url() -> str:
     if parts.query or parts.fragment:
         raise CRMConfigError("CRM_API_URL must not contain a query or fragment")
     return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+
+
+def crm_web_url() -> str | None:
+    """CRM_WEB_URL: the CRM web app's address, for "open in the CRM" links (docs/instructions20.md).
+
+    Optional and separate from CRM_API_URL. Missing or not a plain http(s) address -> None,
+    and no link is shown. Only ever put into links; never called.
+    """
+    raw = os.environ.get("CRM_WEB_URL", "").strip()
+    if not raw:
+        return None
+    try:
+        parts = urlsplit(raw)
+        parts.port
+    except ValueError:
+        return None
+    if (parts.scheme not in ("http", "https") or not parts.hostname or parts.username is not None
+            or parts.password is not None or "@" in parts.netloc or parts.query or parts.fragment):
+        return None
+    return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
+
+
+def contact_page_url(contact_id: int) -> str | None:
+    """The person's full page in the CRM web app (/dashboard/contacts/{id}), or None."""
+    base = crm_web_url()
+    return f"{base}/dashboard/contacts/{contact_id}" if base and _is_id(contact_id) else None
 
 
 def make_http_client(base_url: str) -> httpx.Client:
@@ -291,7 +317,10 @@ def verify_login(token: str) -> BridgeResult:
     if not _is_user(data):
         logger.warning("Login check: unexpected 200 body from the CRM")
         return _failure(503, "unavailable", UNAVAILABLE_MESSAGE)
-    return BridgeResult(200, {"status": "valid"})
+    # The role decides what the chat offers (instructions20: no contacts for an activist or
+    # a campaign manager). Not a string -> None, which the chat treats as the narrowest role.
+    role = data.get("role") if isinstance(data.get("role"), str) else None
+    return BridgeResult(200, {"status": "valid", "role": role})
 
 
 def _is_user(data) -> bool:
@@ -367,7 +396,7 @@ def confirm_proposal(token: str, proposal_id: str, payload_hash: str, fields: di
 
 
 # --- Apartment edit (sheepsidebay_crm docs/fixes115.md) ------------------------
-# The CRM's GET /api/assistant/apartments/search, /by-lineage/{id} and
+# The CRM's GET /api/assistant/apartments/search, /getapartment?id= and
 # POST /{id}/update (backend/app/routers/assistant_apartments.py). Every
 # apartment comes with its `editable_fields`, decided by the CRM per user and
 # apartment. Same rules as the contact bridge: the user's token only, to
@@ -464,16 +493,60 @@ def search_apartments(token: str, query: str) -> BridgeResult:
     return BridgeResult(200, {"status": "ok", "results": results, "truncated": bool(data.get("truncated"))})
 
 
-def apartment_by_lineage(token: str, lineage_id: int) -> BridgeResult:
-    """The lineage's current version: the re-resolution read after a lost answer, 404 or 409."""
+def get_apartment(token: str, lineage_id: int) -> BridgeResult:
+    """The lineage's current version (GET /getapartment?id=<lineage id>, sheepsidebay_crm
+    fixes118): opening an apartment picked from a search, and every re-read after it."""
     if not _is_id(lineage_id):
         return _failure(404, "not_found", "No such apartment for this user.")
-    failure, data = _read(f"{APARTMENTS_PATH}/by-lineage/{lineage_id}", token)
+    failure, data = _read(f"{APARTMENTS_PATH}/getapartment", token, {"id": lineage_id})
     if failure:
         return failure
     if not _is_apartment(data):
         return _failure(502, "crm_contract_error", "The CRM's apartment answer had an unexpected shape.")
     return BridgeResult(200, {"status": "ok", "apartment": data})
+
+
+# --- The combined search (sheepsidebay_crm fixes117, docs/instructions20.md) ----------
+# GET /api/assistant/search?q=: people and apartments in one answer. The CRM decides
+# who sees what (people only for admin and staff; apartments as in the apartment
+# search). The chat additionally drops people for any other role.
+
+SEARCH_PATH = "/api/assistant/search"
+MIN_SEARCH_LENGTH = 2  # the CRM refuses shorter text (400)
+
+
+def _is_text(value) -> bool:
+    return value is None or isinstance(value, str)
+
+
+def _is_person(data) -> bool:
+    return (isinstance(data, dict) and _is_id(data.get("id"))
+            and all(_is_text(data.get(k)) for k in ("name", "last_name", "phone", "address",
+                                                    "status", "status_label")))
+
+
+def search_everything(token: str, query: str) -> BridgeResult:
+    """People and apartments matching `query`. A read: safe to repeat."""
+    failure, data = _read(SEARCH_PATH, token, {"q": query})
+    if failure:
+        if failure.body["status"] == "not_found":
+            # The route itself is missing: this CRM doesn't have fixes117 yet.
+            return _failure(502, "search_missing", "This CRM does not offer the assistant search.")
+        return failure
+    if not (isinstance(data, dict) and isinstance(data.get("people"), list)
+            and isinstance(data.get("apartments"), list)
+            and all(_is_person(p) for p in data["people"])
+            and all(_is_apartment(a) for a in data["apartments"])):
+        return _failure(502, "crm_contract_error", "The CRM's search answer had an unexpected shape.")
+    return BridgeResult(200, {
+        "status": "ok",
+        "people": data["people"],
+        "apartments": data["apartments"],
+        "people_truncated": data.get("people_truncated") is True,
+        "apartments_truncated": data.get("apartments_truncated") is True,
+        # Only an explicit true allows offering to add someone.
+        "can_add_person": data.get("can_add_person") is True,
+    })
 
 
 def update_apartment_field(token: str, apartment_id: int, field_key: str, value) -> BridgeResult:
@@ -525,8 +598,8 @@ def update_apartment_field(token: str, apartment_id: int, field_key: str, value)
 
 
 # --- The user's language (docs/instructions19.md) ------------------------------
-# The CRM's preference "locale" is the only stored copy. Only that key is read
-# or written; the rest of the preference map never leaves this module.
+# The CRM's preference "locale" is the only stored copy. Only that key is read,
+# never written; the rest of the preference map never leaves this module.
 
 def read_language(token: str) -> str | None:
     """The CRM's locale for this user: "he", "en", or None (unset, odd value, or any failure)."""
@@ -547,28 +620,3 @@ def read_language(token: str) -> str | None:
     locale = data.get("locale") if isinstance(data, dict) else None
     return locale if locale in LOCALES else None
 
-
-def save_language(token: str, language: str) -> BridgeResult:
-    """PUT {"key": "locale", "value": language}. 200 {"status": "saved", "language"} or a failure."""
-    if language not in LOCALES:
-        return _failure(400, "invalid_language", "The language must be he or en.")
-    try:
-        base_url = crm_base_url()
-        with make_http_client(base_url) as client:
-            response = client.put(PREFERENCES_PATH, json={"key": "locale", "value": language},
-                                  headers={"Authorization": f"Bearer {token}"})
-    except CRMConfigError as error:
-        return _failure(503, "crm_not_configured", str(error))
-    except httpx.TimeoutException:
-        logger.warning("CRM language save timed out")
-        return _failure(504, "crm_timeout", "The CRM did not answer in time.")
-    except httpx.HTTPError as error:
-        logger.warning("CRM language save failed: %s", type(error).__name__)
-        return _failure(502, "crm_unreachable", "Could not reach the CRM.")
-    code = response.status_code
-    if code == 401:
-        return _failure(401, "unauthorized", "The CRM did not accept the bearer token.")
-    if code != 200:
-        logger.warning("CRM language save answer: HTTP %s", code)
-        return _failure(502, "crm_error", f"Unexpected CRM answer (HTTP {code}).")
-    return BridgeResult(200, {"status": "saved", "language": language})

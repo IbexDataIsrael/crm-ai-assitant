@@ -2,7 +2,7 @@
 
 DEMO DATA ONLY. There is no CRM connection. Nothing here reads or changes
 a real record. Adding a contact is no longer a demo: it is the real
-"Create a contact" conversation (app/contact_chat.py), started from the menu.
+add-a-person conversation (app/contact_chat.py), started from the chat box.
 """
 
 DEMO_LABEL = {"en": "DEMO DATA - not a real CRM record", "he": "נתוני הדגמה - לא רשומה אמיתית ב-CRM"}
@@ -11,9 +11,9 @@ DEMO_NOTE = {
     "he": "שום רשומה לא שונתה. זו רק הדגמה של איך עדכון היה נראה.",
 }
 ADD_CONTACT_POINTER = {
-    "en": "To create a contact, choose \"Create a contact\" from the menu (after logging in). "
-          "Nothing was saved by this message.",
-    "he": "כדי ליצור איש קשר, בחרו \"יצירת איש קשר\" בתפריט (אחרי ההתחברות). ההודעה הזו לא שמרה דבר.",
+    "en": "To add a person, type their name in the chat box after logging in, for example \"add Yosef Cohen\". "
+          "Nothing was saved.",
+    "he": "כדי להוסיף אדם, כתבו את שמו בתיבת הצ'אט אחרי ההתחברות, למשל \"הוסף יוסף כהן\". לא נשמר דבר.",
 }
 
 

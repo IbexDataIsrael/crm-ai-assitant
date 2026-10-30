@@ -171,7 +171,8 @@ def test_many_matches_are_numbered_with_the_truncated_note_and_picked_by_number(
         assert "choose one of the numbers" in again["reply"] and len(fake_crm.requests) == 1
     fake_crm.answers.append(ok(second))
     picked = turn(client, "2", data["state"])
-    assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/by-lineage/12"
+    assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/getapartment"
+    assert fake_crm.requests[-1].url.params["id"] == "12"
     assert "Apartment #12" in picked["reply"] and picked["state"]["apartment_id"] == 12
 
 
@@ -394,7 +395,8 @@ def test_409_rereads_by_lineage_and_never_resends(client, fake_crm):
     again = turn(client, "yes", confirm["state"])
     assert len(posts(fake_crm)) == 1
     assert fake_crm.requests[-1].method == "GET"
-    assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/by-lineage/11"
+    assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/getapartment"
+    assert fake_crm.requests[-1].url.params["id"] == "11"
     assert "changed by someone else" in again["reply"] and "Apartment #30" in again["reply"]
     assert "- Jewish status: Jewish" in again["reply"]
     assert again["state"]["step"] == "choose_value" and again["state"]["apartment_id"] == 30
@@ -508,7 +510,8 @@ def test_403_says_the_same_thing_for_every_reason_and_reloads(client, fake_crm, 
     done = turn(client, "yes", confirm["state"])
     assert done["reply"].startswith("The CRM says Jewish status can't be edited here. Nothing was saved.")
     assert detail not in done["reply"]
-    assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/by-lineage/11"
+    assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/getapartment"
+    assert fake_crm.requests[-1].url.params["id"] == "11"
     assert done["state"]["step"] == "choose_field" and [c["label"] for c in done["choices"]] == ["1. Phone"]
 
 

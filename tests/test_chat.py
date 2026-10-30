@@ -58,12 +58,12 @@ def test_empty_message_asks_to_clarify_never_acts(client, message):
 
 
 @pytest.mark.parametrize("message", ["add a contact", "הוסף איש קשר"])
-def test_add_command_points_to_the_menu_instead_of_demo_data(client, message):
-    """Adding a contact is the real menu conversation now; a typed command saves nothing and shows no demo."""
+def test_add_command_points_to_the_chat_box_instead_of_demo_data(client, message):
+    """Adding a person starts from the free-text box now; a typed command here saves nothing and shows no demo."""
     data = ask(client, message)
     assert data["route"] == "action"
     assert data["route_source"] == "keyword-stub"
-    assert 'choose "Create a contact" from the menu' in data["reply"]
+    assert 'type their name in the chat box' in data["reply"]
     assert "Nothing was saved" in data["reply"]
     assert "DEMO DATA" not in data["reply"]
     assert data["passages"] == []

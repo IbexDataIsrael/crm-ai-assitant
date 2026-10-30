@@ -178,7 +178,7 @@ MESSAGES = {
         "saved_hidden": "Saved. After this change the CRM no longer lets you edit {label}, "
                         "so its value isn't shown here.",
         "unchanged": "Nothing changed - the CRM already had {label}: {value}.",
-        "next": "Choose another field to change, or pick something else from the menu.",
+        "next": "Choose another field to change, or press Cancel to search for something else.",
         "stale": "This apartment was changed by someone else meanwhile, so nothing was saved. "
                  "Its current state:",
         "not_found_reread": "That version of the apartment is no longer current, so nothing was saved. "
@@ -253,7 +253,7 @@ MESSAGES = {
         "saved": "נשמר. ב-CRM מופיע עכשיו {label}: {value}.",
         "saved_hidden": "נשמר. אחרי השינוי ה-CRM כבר לא מאפשר לכם לערוך את {label}, ולכן הערך לא מוצג כאן.",
         "unchanged": "לא שונה דבר - ב-CRM כבר היה {label}: {value}.",
-        "next": "בחרו שדה נוסף לשינוי, או בחרו משהו אחר מהתפריט.",
+        "next": "בחרו שדה נוסף לשינוי, או לחצו על ביטול כדי לחפש משהו אחר.",
         "stale": "מישהו אחר שינה את הדירה בינתיים, ולכן לא נשמר דבר. המצב הנוכחי:",
         "not_found_reread": "הגרסה הזו של הדירה כבר אינה עדכנית, ולכן לא נשמר דבר. המצב הנוכחי:",
         "gone": "הדירה הזו כבר אינה זמינה לכם, ולכן לא נשמר דבר.",
@@ -395,7 +395,8 @@ def _answer(state: ApartmentEditState, outcome: str, prompt: str, *, intro: str 
 
 
 def start(language: str) -> dict:
-    """The menu choice "Edit an apartment": a fresh conversation, nothing sent anywhere."""
+    """A fresh conversation that asks for the address, nothing sent anywhere. The page now
+    opens apartments from the combined search instead (open_apartment)."""
     state = ApartmentEditState(language=language)
     return _answer(state, "started", say(language, "start"))
 
@@ -639,7 +640,7 @@ def _search(token: str, state: ApartmentEditState, query: str) -> dict:
 
 def _read_lineage(token: str, state: ApartmentEditState, lineage_id: int):
     """(apartment, None), (None, None) if gone, or (None, failure answer)."""
-    result = crm_api.apartment_by_lineage(token, lineage_id)
+    result = crm_api.get_apartment(token, lineage_id)
     status = result.body.get("status")
     if status == "ok":
         return Apartment(**result.body["apartment"]), None
@@ -663,6 +664,12 @@ def _reread(token: str, state: ApartmentEditState):
     if apt is None:
         return None, _gone(state)
     return apt, None
+
+
+def open_apartment(token: str, language: str, lineage_id: int) -> dict:
+    """An apartment picked from the combined search (docs/instructions20.md): read it fresh
+    by its lineage id and ask which field to change."""
+    return _open_lineage(token, ApartmentEditState(language=language), lineage_id)
 
 
 def _open_lineage(token: str, state: ApartmentEditState, lineage_id: int) -> dict:

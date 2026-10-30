@@ -36,6 +36,7 @@ services:
       # Required, no default: the CRM address is chosen at deploy time.
       CRM_API_URL: ${CRM_API_URL:?missing - set CRM_API_URL in .env (see DEPLOY.md)}
       # Optional; empty means "not set" (the app then uses its defaults).
+      CRM_WEB_URL: ${CRM_WEB_URL:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GEMINI_MODEL: ${GEMINI_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}

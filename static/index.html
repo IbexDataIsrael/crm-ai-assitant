@@ -36,7 +36,8 @@
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .choices { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
-    .soon { font-size: 14px; font-weight: bold; color: #555; background: #eee; border-radius: 4px; padding: 1px 6px; margin-inline-start: 6px; }
+    .group-title { font-size: 16px; font-weight: bold; margin-top: 10px; }
+    .crm-link { display: inline-block; margin-top: 6px; }
     .live { color: #8a4b00; font-weight: bold; }
     .multi { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
     .multi label { display: flex; gap: 8px; align-items: center; font-size: 18px; }
@@ -44,14 +45,11 @@
     .long { flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 320px; overflow-y: auto; }
     .long button { text-align: start; }
     .filter { margin-top: 8px; width: 100%; box-sizing: border-box; }
-    .lang-note { font-size: 16px; color: #555; }
   </style>
 </head>
 <body>
   <div class="top">
     <h1 data-t="title">CRM Assistant</h1>
-    <!-- After login only. Shows the OTHER language's name; a press switches at once (docs/instructions19.md). -->
-    <button type="button" id="language-toggle" class="hidden">עברית</button>
   </div>
   <p class="demo" data-t="banner_demo"></p>
   <p class="live" data-t="banner_live"></p>
@@ -81,30 +79,33 @@
   <form id="form" class="hidden">
     <input id="message" autocomplete="off" data-t-placeholder="placeholder" aria-label="Message">
     <button type="submit" data-t="send"></button>
+    <!-- Shown during any operation; off only while a request is in flight (it can't be recalled). -->
+    <button type="button" id="cancel" class="hidden" data-t="cancel"></button>
   </form>
 
   <script>
-    // --- The user's language (docs/instructions19.md) -------------------------
+    // --- The user's language (docs/instructions19.md, instructions20.md) -------
+    // The CRM's interface language (preference "locale"), read at login and when a
+    // remembered login is resumed. The chat never changes it: no toggle, no switch.
     // One he/en dictionary for every text the page writes itself. Server replies
-    // arrive already in the session language; CRM values, labels, IDs and guide
+    // arrive already in that language; CRM values, labels, IDs and guide
     // passages are shown exactly as they come.
     const TEXT = {
       en: {
         title: "CRM Assistant",
-        other_language: "עברית",
-        banner_demo: "Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set. Typed \"find\" / \"update\" commands still return demo data.",
-        banner_live: "Create a contact talks to the real CRM: a draft you confirm with \"yes\" is saved there as a real record. Edit an apartment also talks to the real CRM: a change you confirm with \"yes\" is saved there.",
+        banner_demo: "Ask a question searches the CRM user guides (English and Hebrew); an AI-written answer appears only when an answer provider key is set.",
+        banner_live: "Typing a name, phone or address searches the real CRM. Adding a person or changing an apartment saves to the real CRM - only after you confirm with \"yes\".",
         logged_in: "Logged in to the CRM.",
         log_out: "Log out",
         placeholder: "Type a message...",
         send: "Send",
-        menu: "What do you want to do?",
-        menu_create: "Create a contact",
-        menu_update: "Update a contact",
-        menu_apartment: "Edit an apartment",
+        cancel: "Cancel",
+        cancelled: "Cancelled. Nothing more will be sent to the CRM.",
+        cancelled_uncertain: "Cancelled. The CRM's answer to the last change was lost, so I can't tell whether it was saved - please check it in the CRM.",
+        menu: "Type a name, a phone number or part of an address, and I'll search the CRM. You can also write \"add <name>\" or \"change <apartment> to <value>\".",
         menu_ask: "Ask a question",
-        soon: "coming later",
-        choose_first: "Please choose from the menu first.",
+        people_title: "People",
+        apartments_title: "Apartments",
         yes: "yes",
         no: "no",
         save: "Save",
@@ -129,8 +130,6 @@
         login_expired: "Your CRM login is no longer valid. Please log in again.",
         assistant_unreachable: "Could not reach the assistant server.",
         login_failed: "Login failed ({status}).",
-        language_saved: "Language saved.",
-        language_not_saved: "I could not save your language. It will stay for this session.",
         login: {
           invalid_credentials: "Incorrect username or password.",
           not_verified: "This account's email is not verified yet.",
@@ -146,20 +145,19 @@
       },
       he: {
         title: "עוזר ה-CRM",
-        other_language: "English",
-        banner_demo: "\"שאלה\" מחפשת במדריכים למשתמש של ה-CRM (באנגלית ובעברית); תשובה שנכתבה ב-AI מופיעה רק כשמוגדר מפתח לספק תשובות. פקודות \"מצא\" / \"עדכן\" שמוקלדות עדיין מחזירות נתוני הדגמה.",
-        banner_live: "\"יצירת איש קשר\" עובדת מול ה-CRM האמיתי: טיוטה שתאשרו ב\"כן\" נשמרת שם כרשומה אמיתית. גם \"עריכת דירה\" עובדת מול ה-CRM האמיתי: שינוי שתאשרו ב\"כן\" נשמר שם.",
+        banner_demo: "\"שאלה\" מחפשת במדריכים למשתמש של ה-CRM (באנגלית ובעברית); תשובה שנכתבה ב-AI מופיעה רק כשמוגדר מפתח לספק תשובות.",
+        banner_live: "הקלדת שם, טלפון או כתובת מחפשת ב-CRM האמיתי. הוספת אדם או שינוי בדירה נשמרים ב-CRM האמיתי - רק אחרי שתאשרו ב\"כן\".",
         logged_in: "מחוברים ל-CRM.",
         log_out: "התנתקות",
         placeholder: "כתבו הודעה...",
         send: "שליחה",
-        menu: "מה תרצו לעשות?",
-        menu_create: "יצירת איש קשר",
-        menu_update: "עדכון איש קשר",
-        menu_apartment: "עריכת דירה",
+        cancel: "ביטול",
+        cancelled: "בוטל. לא יישלח עוד דבר ל-CRM.",
+        cancelled_uncertain: "בוטל. התשובה מה-CRM על השינוי האחרון אבדה, ולכן אינני יודע אם הוא נשמר - אנא בדקו אותו ב-CRM.",
+        menu: "כתבו שם, מספר טלפון או חלק מכתובת, ואחפש ב-CRM. אפשר גם לכתוב \"הוסף <שם>\" או \"שנה <דירה> ל<ערך>\".",
         menu_ask: "שאלה",
-        soon: "בקרוב",
-        choose_first: "אנא בחרו קודם מהתפריט.",
+        people_title: "אנשים",
+        apartments_title: "דירות",
         yes: "כן",
         no: "לא",
         save: "שמירה",
@@ -184,8 +182,6 @@
         login_expired: "ההתחברות ל-CRM כבר אינה בתוקף. אנא התחברו שוב.",
         assistant_unreachable: "לא ניתן להגיע לשרת העוזר.",
         login_failed: "ההתחברות נכשלה ({status}).",
-        language_saved: "השפה נשמרה.",
-        language_not_saved: "לא הצלחתי לשמור את השפה. היא תישאר לשיחה הזו.",
         login: {
           invalid_credentials: "שם משתמש או סיסמה שגויים.",
           not_verified: "כתובת האימייל של החשבון עדיין לא אומתה.",
@@ -203,9 +199,6 @@
 
     // Before login: English only. After login: the CRM's value (English when it has none).
     let language = "en";
-    // After login: the session's language state, as app/language.py defines it
-    // (language, toggled, streak, saved, retry). Sent with every turn; no token in it.
-    let languageState = null;
 
     function t(key, values) {
       let text = TEXT[language][key];
@@ -219,7 +212,6 @@
       document.title = t("title");
       document.querySelectorAll("[data-t]").forEach(n => { n.textContent = t(n.getAttribute("data-t")); });
       document.querySelectorAll("[data-t-placeholder]").forEach(n => { n.placeholder = t(n.getAttribute("data-t-placeholder")); });
-      document.getElementById("language-toggle").textContent = t("other_language");
     }
 
     const log = document.getElementById("log");
@@ -324,13 +316,6 @@
       div.scrollIntoView();
     }
 
-    function addNotice(text) {
-      const div = botBubble();
-      div.appendChild(el("div", "lang-note", text));
-      log.appendChild(div);
-      div.scrollIntoView();
-    }
-
     // --- Login, menu and the conversation -----------------------------------
     // The CRM token is remembered in localStorage, like the CRM's own site does, so a reload
     // or a new tab stays logged in. It lasts as long as the CRM accepts it (the CRM checks it
@@ -356,7 +341,10 @@
       forgetLogin();
       return null;
     }
-    let intent = null;        // set by the menu, never from free text
+    // null = the free-text box searches the CRM (docs/instructions20.md). Otherwise the flow
+    // a button or the server's answer started; never guessed from free text on the page.
+    let intent = null;
+    let searchState = null;   // search state, as the server returned it (an add offer waiting)
     let conversation = null;  // create_contact state, as the server returned it
     let apartmentState = null;  // edit_apartment state, as the server returned it
     // One turn at a time: while a request is in flight, sending and every
@@ -370,6 +358,7 @@
     const orgChoice = document.getElementById("org-choice");
     const orgButtons = document.getElementById("org-buttons");
     const chatForm = document.getElementById("form");
+    const cancelButton = document.getElementById("cancel");
 
     function show(node, visible) { node.classList.toggle("hidden", !visible); }
 
@@ -377,6 +366,21 @@
       intent = null;
       conversation = null;
       apartmentState = null;
+      searchState = null;
+      show(cancelButton, false);
+    }
+
+    // Cancel: drop the conversation (the server keeps none), so nothing more is sent.
+    // Every earlier button is switched off, so no old step can be sent afterwards.
+    function cancelOperation() {
+      if (busy || !intent) return;
+      const uncertain = (apartmentState && apartmentState.step === "blocked")
+        || (conversation && conversation.pending && conversation.pending.uncertain);
+      addUser(t("cancel"));
+      log.querySelectorAll("button, input").forEach(n => { n.disabled = true; });
+      clearConversation();
+      addConversationReply({ reply: t(uncertain ? "cancelled_uncertain" : "cancelled") });
+      addMenu();
     }
 
     function setBusy(value) {
@@ -389,10 +393,8 @@
       forgetLogin();
       clearConversation();
       // The login screen is English only; the next login reads the CRM's value again.
-      languageState = null;
       language = "en";
       applyLanguage();
-      show(document.getElementById("language-toggle"), false);
       password.value = "";
       show(orgChoice, false);
       show(loginForm, true);
@@ -414,12 +416,9 @@
       rememberLogin(newToken);
       username.value = "";
       password.value = "";
-      // The CRM value wins at every new session; without one, English (never saved by itself).
-      const saved = crmLanguage === "he" || crmLanguage === "en" ? crmLanguage : null;
-      language = saved || "en";
-      languageState = { language, toggled: false, streak: 0, saved, retry: null };
+      // The CRM value at every new session; without one, English. Never saved by the chat.
+      language = crmLanguage === "he" || crmLanguage === "en" ? crmLanguage : "en";
       applyLanguage();
-      show(document.getElementById("language-toggle"), true);
       show(document.getElementById("login-panel"), false);
       show(document.getElementById("session"), true);
       show(chatForm, true);
@@ -447,64 +446,6 @@
       else {
         loginError.textContent = (data && data.reply) || t("assistant_unreachable");
         show(loginError, true);
-      }
-    }
-
-    // Save an explicit choice (POST /assistant/language). Never the same value twice; a failure
-    // keeps the language for the session and the next turn tries once more (server side).
-    async function saveLanguage(value) {
-      if (!token || !languageState) return;
-      if (languageState.saved === value) {
-        languageState.retry = null;
-        return;
-      }
-      const sentWith = token;
-      let res, data;
-      try {
-        res = await fetch("/assistant/language", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
-          body: JSON.stringify({ language: value }),
-        });
-        data = await res.json().catch(() => ({}));
-      } catch (err) {
-        res = null;
-      }
-      if (token !== sentWith || !languageState) return;
-      if (res && res.status === 401) {
-        logout(data.reply || t("login_expired"));
-        return;
-      }
-      if (res && res.ok && data.status === "saved") {
-        if (languageState.language === value) {
-          languageState.saved = value;
-          languageState.retry = null;
-        }
-        addNotice(t("language_saved"));
-        return;
-      }
-      if (languageState.language === value) languageState.retry = value;
-      addNotice(t("language_not_saved"));
-    }
-
-    function toggleLanguage() {
-      if (!token) return;  // the toggle is shown only after login
-      language = language === "he" ? "en" : "he";
-      applyLanguage();
-      // A press applies at once, counts as "toggled" for this session and resets the row.
-      languageState.language = language;
-      languageState.toggled = true;
-      languageState.streak = 0;
-      saveLanguage(language);
-    }
-
-    // The server's answer to a turn: adopt its language state; a switch re-labels the page.
-    function adoptLanguage(data) {
-      if (!data.language_state) return;
-      languageState = data.language_state;
-      if (languageState.language !== language) {
-        language = languageState.language;
-        applyLanguage();
       }
     }
 
@@ -552,37 +493,79 @@
 
     loginForm.addEventListener("submit", (e) => { e.preventDefault(); login(); });
     document.getElementById("logout").addEventListener("click", () => logout());
-    document.getElementById("language-toggle").addEventListener("click", () => toggleLanguage());
+    cancelButton.addEventListener("click", () => cancelOperation());
 
+    // The start: one free-text box (it searches the CRM) and the guide questions button.
     function addMenu() {
       const div = botBubble();
       div.appendChild(el("div", "text", t("menu")));
       const choices = el("div", "choices");
-      const create = el("button", null, t("menu_create"));
-      create.type = "button";
-      create.addEventListener("click", () => choose("create_contact", create.textContent));
-      const update = el("button", null, t("menu_update"));
-      update.type = "button";
-      update.disabled = true;  // not built: never calls anything
-      update.appendChild(el("span", "soon", t("soon")));
       const ask = el("button", null, t("menu_ask"));
       ask.type = "button";
       ask.addEventListener("click", () => choose("ask_question", ask.textContent));
-      const apartment = el("button", null, t("menu_apartment"));
-      apartment.type = "button";
-      apartment.addEventListener("click", () => choose("edit_apartment", apartment.textContent));
-      choices.append(create, update, apartment, ask);
+      choices.append(ask);
       div.appendChild(choices);
       log.appendChild(div);
       div.scrollIntoView();
     }
 
-    function choose(newIntent, label) {
+    function choose(newIntent, label, extra) {
       if (busy) return;
       clearConversation();
       intent = newIntent;
+      show(cancelButton, true);
       addUser(label);
-      sendTurn("");  // a menu choice is never counted for the language
+      sendTurn("", extra);
+    }
+
+    // A search answer: the count, then People / Apartments as buttons that open the record.
+    function addSearchReply(data) {
+      log.querySelectorAll(".search-choices button").forEach(n => { n.disabled = true; });
+      const div = botBubble();
+      const choices = data.choices || [];
+      div.appendChild(el("div", "text", choices.length ? data.prompt : data.reply));
+      const groups = { people: t("people_title"), apartments: t("apartments_title") };
+      let row = null, group;
+      choices.forEach(c => {
+        if (!row || c.group !== group) {
+          group = c.group;
+          if (groups[group]) div.appendChild(el("div", "group-title", groups[group]));
+          const many = groups[group] && choices.filter(x => x.group === group).length > 1;
+          row = el("div", "choices search-choices" + (many ? " long" : ""));
+          div.appendChild(row);
+        }
+        const b = el("button", null, c.label);
+        b.type = "button";
+        b.addEventListener("click", () => pick(c));
+        row.appendChild(b);
+      });
+      if (data.link) addLink(div, data.link);
+      log.appendChild(div);
+      div.scrollIntoView();
+    }
+
+    function addLink(div, link) {
+      // Only an http(s) address the server built from CRM_WEB_URL; opened in a new tab.
+      if (!/^https?:\/\//.test(link.url)) return;
+      const a = document.createElement("a");
+      a.className = "crm-link";
+      a.setAttribute("href", link.url);
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+      a.textContent = link.label;
+      div.appendChild(a);
+    }
+
+    function pick(choice) {
+      if (busy) return;
+      if (choice.action === "open_apartment") choose("edit_apartment", choice.label, { open_id: choice.id });
+      else if (choice.action === "open_person") choose("open_person", choice.label, { open_id: choice.id });
+      else if (choice.action === "add_person") choose("create_contact", choice.label);
+      else if (choice.action === "dismiss") {
+        // "No" to the add offer: the server answers it (the offer is in searchState).
+        addUser(choice.label);
+        sendTurn(t("no"));
+      }
     }
 
     function addConversationReply(data) {
@@ -683,24 +666,25 @@
       div.scrollIntoView();
     }
 
-    async function sendTurn(message) {
+    async function sendTurn(message, extra) {
       if (busy) return;
       setBusy(true);
       try {
-        await sendTurnNow(message);
+        await sendTurnNow(message, extra);
       } finally {
         setBusy(false);
       }
     }
 
-    async function sendTurnNow(message) {
+    async function sendTurnNow(message, extra) {
       const sentWith = token;
       const headers = { "Content-Type": "application/json" };
       // Every intent needs the login now: the server checks it with the CRM first.
       headers["Authorization"] = "Bearer " + token;
-      const body = { intent, message, language, language_state: languageState };
+      const body = { intent: intent || "search", message, language, ...(extra || {}) };
       if (intent === "create_contact" && conversation) body.state = conversation;
       if (intent === "edit_apartment" && apartmentState) body.apartment_state = apartmentState;
+      if (!intent && searchState) body.search_state = searchState;
       try {
         const res = await fetch("/assistant/turn", { method: "POST", headers, body: JSON.stringify(body) });
         if (token !== sentWith) return;  // logged out or another login meanwhile: drop the answer
@@ -720,21 +704,30 @@
           return;
         }
         const data = await res.json();
-        adoptLanguage(data);  // before drawing: the reply is already in the new language
         if (data.intent === "ask_question" && data.outcome === "answered") {
           addBot(data);
         } else if (data.intent === "edit_apartment") {
+          // A search may hand over to a flow (e.g. "change 2C to ..."): the page follows the server.
+          intent = "edit_apartment";
+          show(cancelButton, true);
           apartmentState = data.state;
           addApartmentReply(data);
           if (data.logout) logout(data.reply);
         } else if (data.intent === "create_contact") {
+          intent = "create_contact";
+          show(cancelButton, true);
           conversation = data.state;
           addConversationReply(data);
+          if (data.logout) logout(data.reply);
+        } else if (data.intent === "search") {
+          // Back to (or still in) the free-text box: no flow open, nothing to cancel.
+          clearConversation();
+          searchState = data.search_state || null;
+          addSearchReply(data);
           if (data.logout) logout(data.reply);
         } else {
           addConversationReply(data);
         }
-        if (data.language_notice) addNotice(data.language_notice);
         if (data.show_menu) {
           clearConversation();
           addMenu();
@@ -750,12 +743,7 @@
       if (!message || busy) return;
       addUser(message);
       input.value = "";
-      if (!intent) {
-        addConversationReply({ reply: t("choose_first") });
-        addMenu();
-        return;
-      }
-      sendTurn(message);
+      sendTurn(message);  // with no flow open, the text is a search
     });
 
     applyLanguage();

@@ -8,7 +8,7 @@ state never contains the token, and nothing here is kept between requests, so
 one login's fields and proposals can't reach another login.
 
 Who does what:
-- The menu sets the intent; this module runs only for "Create a contact".
+- The page starts it (a search with no match, or "add <name>"); this module runs only for adding a person.
 - The model (app/field_extraction.py) only turns a message into fields.
 - The CRM, through the bridge, decides what is missing or invalid and makes
   the proposal. All saving goes through the bridge.
@@ -130,7 +130,7 @@ MESSAGES = {
         "ambiguous": "I need a clear answer before saving anything. Reply \"yes\" to save exactly the draft "
                      "above, \"no\" to cancel, or tell me what to change.",
         "cancelled": "Cancelled - nothing was saved. Tell me what to change if you want a new proposal, "
-                     "or choose from the menu.",
+                     "or press Cancel to search for something else.",
         "cancelled_uncertain": "Stopped. I still don't know whether the earlier save went through - "
                                "please check the drafts in the CRM before adding this contact again.",
         "nothing_pending": "There is nothing waiting for confirmation, so nothing was saved.",
@@ -183,7 +183,7 @@ MESSAGES = {
                  "או כתבו מה לשנות.",
         "ambiguous": "אני צריך תשובה ברורה לפני שמירה. השיבו \"כן\" כדי לשמור בדיוק את הטיוטה שלמעלה, "
                      "\"לא\" כדי לבטל, או כתבו מה לשנות.",
-        "cancelled": "בוטל - לא נשמר דבר. כתבו מה לשנות אם תרצו הצעה חדשה, או בחרו מהתפריט.",
+        "cancelled": "בוטל - לא נשמר דבר. כתבו מה לשנות אם תרצו הצעה חדשה, או לחצו על ביטול כדי לחפש משהו אחר.",
         "cancelled_uncertain": "הופסק. עדיין לא ידוע אם השמירה הקודמת הצליחה - "
                                "אנא בדקו את הטיוטות ב-CRM לפני שתוסיפו את איש הקשר שוב.",
         "nothing_pending": "אין כרגע שום דבר שממתין לאישור, ולכן לא נשמר דבר.",
@@ -264,15 +264,13 @@ def _answer(state: ConversationState, outcome: str, reply: str, *, logout: bool 
 
 
 def start(language: str) -> dict:
-    """The menu choice "Create a contact": a fresh conversation, nothing sent anywhere."""
+    """Adding a person: a fresh conversation, nothing sent anywhere."""
     state = ConversationState(language=language, asked=list(REQUIRED_FIELDS))
     return _answer(state, "started", say(language, "start"))
 
 
-def handle_turn(token: str, message: str, state: ConversationState, observe=None) -> dict:
-    """`observe(text, field values)` (app/language.py, passed by the route) sees each free message
-    once its field values are known and returns the session language; confirm, cancel and skip
-    words are never shown to it. The language is the session's: this module never guesses it."""
+def handle_turn(token: str, message: str, state: ConversationState) -> dict:
+    """The language is the user's CRM language (state.language): this module never guesses it."""
     text = message.strip()
     lang = state.language
     pending = state.pending
@@ -291,9 +289,7 @@ def handle_turn(token: str, message: str, state: ConversationState, observe=None
         if pending.uncertain:
             # Never a new proposal while the last save is unknown.
             return _answer(state, "uncertain", say(lang, "uncertain_waiting"))
-        changed = _read_message(text, state, observe)
-        lang = state.language
-        if not changed:
+        if not _apply_message(text, state):
             return _answer(state, "awaiting_confirmation", say(lang, "ambiguous"))
         state.pending = None  # the details changed: the old proposal is dropped, a fresh yes is needed
         return _propose(token, state)
@@ -313,21 +309,13 @@ def handle_turn(token: str, message: str, state: ConversationState, observe=None
             setattr(state.fields, name, None)
         return _propose(token, state)
 
-    if not _read_message(text, state, observe):
+    if not _apply_message(text, state):
         return _answer(state, "needs_information", _ask_text(state, not_understood=True))
     return _propose(token, state)
 
 
-def _read_message(text: str, state: ConversationState, observe) -> bool:
-    """Read the fields, then let the session language see the message without them."""
-    changed, values = _apply_message(text, state)
-    if observe is not None:
-        state.language = observe(text, values)
-    return changed
-
-
-def _apply_message(text: str, state: ConversationState) -> tuple[bool, list[str]]:
-    """Read fields from the message into state.fields: (any field changed, the values read)."""
+def _apply_message(text: str, state: ConversationState) -> bool:
+    """Read fields from the message into state.fields; True if any field changed."""
     extraction = field_extraction.extract_fields(text, list(state.asked))
     if extraction.status == "ok":
         found = extraction.fields
@@ -341,7 +329,7 @@ def _apply_message(text: str, state: ConversationState) -> tuple[bool, list[str]
         if getattr(state.fields, name) != value:
             setattr(state.fields, name, value)
             changed = True
-    return changed, [v for v in found.values() if isinstance(v, str)]
+    return changed
 
 
 def _missing_required(state: ConversationState) -> list[str]:
