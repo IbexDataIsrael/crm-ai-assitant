@@ -512,13 +512,13 @@
       div.scrollIntoView();
     }
 
-    function choose(newIntent, label, extra) {
+    function choose(newIntent, label, extra, message) {
       if (busy) return;
       clearConversation();
       intent = newIntent;
       show(cancelButton, true);
       addUser(label);
-      sendTurn("", extra);
+      sendTurn(message || "", extra);
     }
 
     // A search answer: the count, then People / Apartments as buttons that open the record.
@@ -563,7 +563,8 @@
       if (busy) return;
       if (choice.action === "open_apartment") choose("edit_apartment", choice.label, { open_id: choice.id });
       else if (choice.action === "open_person") choose("person", choice.label, { open_id: choice.id });
-      else if (choice.action === "add_person") choose("create_contact", choice.label);
+      // The user's own request travels with the button, so its details reach the add flow.
+      else if (choice.action === "add_person") choose("create_contact", choice.label, undefined, choice.message);
       else if (choice.action === "dismiss") {
         // "No" to the add offer: the server answers it (the offer is in searchState).
         addUser(choice.label);
@@ -625,6 +626,7 @@
           const check = document.createElement("input");
           check.type = "checkbox";
           check.value = c.message;
+          check.checked = !!c.checked;  // ticked already from the user's own request
           label.append(check, document.createTextNode(c.label));
           box.appendChild(label);
           return check;

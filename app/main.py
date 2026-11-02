@@ -228,6 +228,23 @@ def answer_message(message: str, language: str = "en") -> dict:
     }
 
 
+def answer_question(question: str, language: str) -> dict:
+    """A question the interpreter recognized (docs/instructions21.md): straight to the guides,
+    the same answer as Ask, without the keyword planner."""
+    passages = knowledge.search(question)
+    generated = generation.generate_answer(question, passages, language=language)
+    return {
+        "intent": "ask_question",
+        "outcome": "answered",
+        "reply": knowledge.format_reply(question, passages, generated, language),
+        "route": "knowledge",
+        "route_source": "interpreter",
+        "passages": passages,
+        "generation": generated.as_dict(),
+        "language": language,
+    }
+
+
 # --- CRM contact-draft bridge (structured fields, no AI) -------------------
 # No AI work here: each call needs the user's CRM bearer token, which is
 # forwarded to CRM_API_URL only, and the CRM itself checks it on that same call
@@ -418,7 +435,8 @@ def _turn(token: str, role: Optional[str], request: TurnRequest, language: str) 
     if request.intent == "search":
         state = request.search_state or SearchState(language=language)
         state.language = language
-        return search_chat.handle_turn(token, message, state, role)
+        return search_chat.handle_turn(token, message, state, role,
+                                       ask=lambda question: answer_question(question, language))
 
     if request.intent == "person":
         # sheepsidebay_crm fixes117: admin and staff only (the CRM answers 404 to anyone else).
@@ -427,7 +445,8 @@ def _turn(token: str, role: Optional[str], request: TurnRequest, language: str) 
         if request.open_id is not None:  # picked from the search results
             return person_chat.open_person(token, language, request.open_id)
         if request.person_state is None:
-            return search_chat.handle_turn(token, "", SearchState(language=language), role)
+            return search_chat.handle_turn(token, "", SearchState(language=language), role,
+                                           ask=lambda question: answer_question(question, language))
         state = request.person_state
         state.language = language
         return person_chat.handle_turn(token, message, state)
@@ -455,10 +474,20 @@ def _turn(token: str, role: Optional[str], request: TurnRequest, language: str) 
     # create_contact: only for the roles that may see people through the helper
     # (the CRM checks its own permission again when the proposal is made).
     if not search_chat.may_see_people(role):
-        return search_chat.start_add(language, role)
+        return search_chat.start_add(token, language, role, None)
     if not message.strip():
         return contact_chat.start(language)
     state = request.state or ConversationState(language=language)
     state.language = language
-    return contact_chat.handle_turn(token, message, state)
+    answer = contact_chat.handle_turn(token, message, state)
+    if answer["outcome"] in ("created", "replayed") and isinstance(answer.get("contact_id"), int):
+        # The add endpoint takes only the basic details; every other field the CRM lets this user
+        # edit is offered right away through the person flow (each change confirmed as usual).
+        more = person_chat.open_person(token, language, answer["contact_id"], edit=True)
+        if more.get("outcome") in ("choose_field", "menu"):
+            note = answer["reply"] + "\n\n" + contact_chat.say(language, "more_fields")
+            more["reply"] = note + "\n\n" + more["reply"]
+            more["prompt"] = note + "\n\n" + more["prompt"]
+            return more
+    return answer
 

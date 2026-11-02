@@ -1,6 +1,7 @@
 """Shared test setup: tests never see a real key and can never call Gemini,
 and they use their own database and login role, never the app's."""
 
+import html
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import crm_api, generation, knowledge, rate_limit
+from app import crm_api, field_extraction, generation, interpreter, knowledge, rate_limit
 from app.embeddings import get_embedder
 from app.vectorstore import VectorStore, database_dsn
 
@@ -111,6 +112,47 @@ class FakeGemini:
 def fake_gemini(monkeypatch):
     """Install a fake client with a fake key. Set .reply or .error in the test."""
     fake = FakeGemini()
+    monkeypatch.setenv("GEMINI_API_KEY", "test-placeholder-not-a-key")
+    monkeypatch.setattr(generation, "make_client", lambda api_key: fake)
+    return fake
+
+
+class FakeAI:
+    """Stands in for Gemini for the request interpreter and the add flow's field reading.
+
+    understandings / extractions: queues of what the model answers - a dict (sent as JSON),
+    a raw string, or an exception to raise. With the interpreter's queue empty it answers
+    {"action": "search", "person": <the request as typed>}; with the extraction queue empty,
+    no fields. Every request is recorded (interpreter_requests / extraction_requests)."""
+
+    def __init__(self):
+        self.understandings, self.extractions = [], []
+        self.interpreter_requests, self.extraction_requests = [], []
+        self.interactions = self
+
+    def create(self, **request):
+        if request["system_instruction"] == interpreter.INSTRUCTION:
+            self.interpreter_requests.append(request)
+            queue = self.understandings
+            default = {"action": "search", "person": _between(request["input"], "<request>\n", "\n</request>")}
+        elif request["system_instruction"] == field_extraction.EXTRACTION_INSTRUCTION:
+            self.extraction_requests.append(request)
+            queue, default = self.extractions, {}
+        else:
+            raise AssertionError("FakeAI only answers the interpreter and the field reading")
+        answer = queue.pop(0) if queue else default
+        if isinstance(answer, BaseException):
+            raise answer
+        return FakeInteraction(answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False))
+
+
+def _between(text, start, end):
+    return html.unescape(text.split(start, 1)[1].split(end, 1)[0])
+
+
+@pytest.fixture
+def fake_ai(monkeypatch):
+    fake = FakeAI()
     monkeypatch.setenv("GEMINI_API_KEY", "test-placeholder-not-a-key")
     monkeypatch.setattr(generation, "make_client", lambda api_key: fake)
     return fake

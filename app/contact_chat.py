@@ -134,6 +134,7 @@ MESSAGES = {
         "cancelled_uncertain": "Stopped. I still don't know whether the earlier save went through - "
                                "please check the drafts in the CRM before adding this contact again.",
         "nothing_pending": "There is nothing waiting for confirmation, so nothing was saved.",
+        "more_fields": "You can fill in more of this person's details now:",
         "created": "Saved as a draft contact (#{contact_id}):\n{draft}\n\n"
                    "It is waiting for approval in the CRM.",
         "replayed": "This contact was already saved by the earlier confirmation - it is the same contact "
@@ -187,6 +188,7 @@ MESSAGES = {
         "cancelled_uncertain": "הופסק. עדיין לא ידוע אם השמירה הקודמת הצליחה - "
                                "אנא בדקו את הטיוטות ב-CRM לפני שתוסיפו את איש הקשר שוב.",
         "nothing_pending": "אין כרגע שום דבר שממתין לאישור, ולכן לא נשמר דבר.",
+        "more_fields": "אפשר למלא עכשיו עוד פרטים של האדם הזה:",
         "created": "נשמר כטיוטת איש קשר (#{contact_id}):\n{draft}\n\nהטיוטה ממתינה לאישור ב-CRM.",
         "replayed": "איש הקשר הזה כבר נשמר באישור הקודם - זה אותו איש קשר (#{contact_id}), "
                     "לא נוצר כפול:\n{draft}\n\nהטיוטה ממתינה לאישור ב-CRM.",
@@ -420,8 +422,10 @@ def _confirm(token: str, state: ConversationState) -> dict:
                            done=True)
         key = "replayed" if body.get("replayed") else "created"
         saved = {n: contact.get(n) for n in FIELD_NAMES}
-        return _answer(fresh, key, say(lang, key, contact_id=body.get("contact_id"), draft=draft_lines(lang, saved)),
-                       done=True)
+        answer = _answer(fresh, key, say(lang, key, contact_id=body.get("contact_id"), draft=draft_lines(lang, saved)),
+                         done=True)
+        answer["contact_id"] = body.get("contact_id")  # the caller may open the new contact for more fields
+        return answer
     if status == "uncertain":
         pending.uncertain = True
         return _answer(state, "uncertain", say(lang, "uncertain"))

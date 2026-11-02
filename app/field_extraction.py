@@ -15,12 +15,15 @@ provider. On Gemini's free tier Google may use it to improve its products.
 """
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from html import escape
 
 from app import generation
+
+log = logging.getLogger(__name__)
 
 FIELD_NAMES = ("first_name", "last_name", "phone", "email", "address")
 MAX_VALUE_LENGTH = 300
@@ -72,6 +75,13 @@ def parse_fields(text: str | None) -> dict:
 
 
 def extract_fields(message: str, asked: list[str]) -> Extraction:
+    result = _extract(message, asked)
+    if result.status != "ok":  # the reason only, never the message
+        log.warning("Field extraction: %s (%s)", result.status, generation.short(generation.redact(result.error or "")))
+    return result
+
+
+def _extract(message: str, asked: list[str]) -> Extraction:
     provider = generation.provider_name()
     if provider not in generation.PROVIDER_LABELS:
         return Extraction("error", error="unknown ANSWER_PROVIDER")

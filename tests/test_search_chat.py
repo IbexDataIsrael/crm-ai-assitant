@@ -17,6 +17,7 @@ from app import search_chat
 from app.main import app
 from tests.conftest import CRM_ME
 from tests.test_apartment_chat import ACTIVIST_FIELDS, AUTH, TOKEN, apt, ok
+from tests.test_contact_chat import proposal
 
 SEARCH_PATH = "/api/assistant/search"
 HEBREW = re.compile(r"[֐-׿]")
@@ -25,6 +26,13 @@ HEBREW = re.compile(r"[֐-׿]")
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def ai(fake_ai):
+    """The interpreter's model is mocked; unless a test queues an answer it reads every
+    request as a plain search for the text as typed (see tests/test_interpreter.py)."""
+    return fake_ai
 
 
 def person(contact_id=5, name="Yosef", last_name="Cohen", address="Herzl 10, Tel Aviv", **values):
@@ -89,7 +97,7 @@ def test_results_count_first_then_people_and_apartments_with_ids(client, fake_cr
     assert reply[5] == "- Herzl 10, Tel Aviv, apartment 3, floor 1 - Cohen"  # never the internal id
     assert [(c["action"], c["id"], c["group"]) for c in data["choices"]] == [
         ("open_person", 5, "people"), ("open_person", 6, "people"), ("open_apartment", 35852, "apartments")]
-    assert data["search_state"] == {"offer_add": False, "language": "en"}
+    assert data["search_state"] == {"offer_add": False, "language": "en", "add_text": None, "clarify": None}
 
 
 @pytest.mark.parametrize("people, apartments, expected", [
@@ -144,8 +152,9 @@ def test_other_roles_are_never_offered_adding(client, fake_crm, role):
 
 
 @pytest.mark.parametrize("role", ["shliach", "campaign_manager", None])
-def test_other_roles_cannot_start_adding_by_any_route(client, fake_crm, role):
+def test_other_roles_cannot_start_adding_by_any_route(client, fake_crm, ai, role):
     as_role(fake_crm, role)
+    ai.understandings.append({"action": "create_contact", "person": "Yosef Cohen"})
     data = turn(client, "add Yosef Cohen")
     assert data["outcome"] == "add_not_allowed" and fake_crm.requests == []
     as_role(fake_crm, role)
@@ -210,55 +219,70 @@ def test_the_search_state_refuses_extra_keys(client, fake_crm):
     assert response.status_code == 422
 
 
-# --- short request forms ---------------------------------------------------------------
+# --- understood requests (docs/instructions21.md; more in tests/test_interpreter.py) ---------
 
-@pytest.mark.parametrize("message, expected", [
-    ("Cohen", ("search", "Cohen", None)),
-    ("Herzl 10 Tel Aviv", ("search", "Herzl 10 Tel Aviv", None)),
-    ("find Dana", ("search", "Dana", None)),
-    ("please search Herzl 10", ("search", "Herzl 10", None)),
-    ("חפש את דנה", ("search", "את דנה", None)),
-    ("add Yosef Cohen", ("add", "Yosef Cohen", None)),
-    ("add a new contact: Yosef Cohen", ("add", "Yosef Cohen", None)),
-    ("Please add contact Yosef Cohen", ("add", "Yosef Cohen", None)),
-    ("הוסף יוסף כהן", ("add", "יוסף כהן", None)),
-    ("תוסיף איש קשר חדש יוסף כהן", ("add", "יוסף כהן", None)),
-    ("צור איש קשר", ("add", "", None)),
-    ("add", ("add", "", None)),
-    ("change 2C to English", ("change", "2C", "English")),
-    ("change Herzl 10 apartment 3 to Jewish", ("change", "Herzl 10 apartment 3", "Jewish")),
-    ("שנה את 2C לאנגלית", ("change", "את 2C", "אנגלית")),
-    ("עדכן הרצל 10 ל-יהודי", ("change", "הרצל 10", "יהודי")),
-    ("change 2C", ("search", "2C", None)),
-    ("how do I add a contact?", ("search", "how do I add a contact?", None)),
-    ("Addison Road 5", ("search", "Addison Road 5", None)),
+@pytest.mark.parametrize("words, expected", [
+    ("Cohen", ["Cohen"]),
+    ("to Yosef Cohen", ["Yosef Cohen"]),
+    ("את דנה", ["דנה"]),
+    ("לג'ון", ["לג'ון", "ג'ון"]),        # a joined preposition is uncertain: as written first
+    ("ל-ג'ון", ["ג'ון"]),                # with a hyphen it is certain
+    ("לאה כהן", ["לאה כהן", "אה כהן"]),  # "לאה" is searched as written first
+    ("משה לוי", ["משה לוי"]),            # מ, ב, ו are never removed
+    ("Herzl 10, apt 3.", ["Herzl 10, apt 3"]),
+    ("the", ["the"]),                     # never removed down to nothing
 ])
-def test_parse(message, expected):
-    assert search_chat.parse(message) == expected
+def test_search_words_only_lose_words_never_gain_or_change_letters(words, expected):
+    assert search_chat.search_texts(words) == expected
 
 
-def test_add_with_a_name_searches_first_and_offers_adding_anyway(client, fake_crm):
+def test_a_name_that_starts_like_a_preposition_is_found_as_written(client, fake_crm, ai):
+    ai.understandings.append({"action": "search", "person": "לאה כהן"})
+    fake_crm.answers.append(found(people=[person(name="לאה", last_name="כהן")]))
+    turn(client, "חפש את לאה כהן", language="he")
+    assert searched(fake_crm) == ["לאה כהן"]
+
+
+def test_add_with_a_name_searches_first_and_offers_adding_anyway_with_the_typed_details(client, fake_crm, ai):
+    text = "add Yosef Cohen, his phone is 052-1234567"
+    ai.understandings.append({"action": "create_contact", "person": "Yosef Cohen"})
     fake_crm.answers.append(found(people=[person()]))
-    data = turn(client, "add Yosef Cohen")
+    data = turn(client, text)
     assert searched(fake_crm) == ["Yosef Cohen"]
     assert data["prompt"].startswith('Before adding "Yosef Cohen", here is who already exists:')
-    assert data["choices"][-1] == {"label": "Add a new person", "action": "add_person"}
+    assert data["choices"][-1] == {"label": "Add a new person", "action": "add_person", "message": text}
 
 
-def test_add_with_a_name_nobody_has_starts_adding(client, fake_crm):
+def test_add_with_a_name_nobody_has_goes_straight_to_the_draft_with_every_detail(client, fake_crm, ai):
+    text = "פגשתי היום את משה לוי, גר בהרצל 10, הטלפון שלו 050-1234567"
+    ai.understandings.append({"action": "create_contact", "person": "משה לוי"})
+    ai.extractions.append({"first_name": "משה", "last_name": "לוי", "phone": "050-1234567", "address": "הרצל 10"})
+    fake_crm.answers += [found(can_add=True),
+                         proposal({"first_name": "משה", "last_name": "לוי", "phone": "050-1234567", "address": "הרצל 10"})]
+    data = turn(client, text, language="he")
+    assert searched(fake_crm) == ["משה לוי"]
+    assert ai.extraction_requests[0]["input"].endswith(f"<message>\n{text}\n</message>")
+    sent = fake_crm.requests[1]
+    assert sent.method == "POST" and sent.url.path == "/api/assistant/proposals"
+    assert data["intent"] == "create_contact" and data["outcome"] == "proposal"
+    assert data["reply"].startswith('אין עדיין מישהו שמתאים ל-"משה לוי"')
+    assert "050-1234567" in data["reply"] and "הרצל 10" in data["reply"]
+    assert data["awaiting_confirmation"]["phone"] == "050-1234567"  # shown, not saved: a yes is still needed
+    assert len(fake_crm.requests) == 2
+
+
+def test_yes_to_the_offer_carries_the_searched_words_into_the_add_flow(client, fake_crm, ai):
     fake_crm.answers.append(found(can_add=True))
-    data = turn(client, "הוסף איש קשר יוסף כהן", language="he")
-    assert searched(fake_crm) == ["יוסף כהן"]
-    assert data["intent"] == "create_contact" and data["reply"].startswith('אין עדיין מישהו שמתאים ל-"יוסף כהן"')
-    assert len(fake_crm.requests) == 1  # nothing proposed or saved yet
+    data = turn(client, "Yosef Cohen")
+    assert data["choices"][0] == {"label": "Yes", "action": "add_person", "message": "Yosef Cohen"}
+    ai.extractions.append({})  # nothing read: the flow asks, nothing is sent to the CRM
+    data = turn(client, "yes", search_state=data["search_state"])
+    assert data["intent"] == "create_contact" and ai.extraction_requests
+    assert len(fake_crm.requests) == 1
 
 
-def test_add_without_a_name_starts_adding_without_a_search(client, fake_crm):
-    data = turn(client, "add a contact")
-    assert data["intent"] == "create_contact" and fake_crm.requests == []
-
-
-def test_change_with_one_apartment_opens_it_and_saves_nothing(client, fake_crm):
+def test_edit_apartment_with_one_match_opens_it_and_saves_nothing(client, fake_crm, ai):
+    ai.understandings.append({"action": "edit_apartment", "person": "Herzl 10", "value": "Jewish"})
     fake_crm.answers += [found(apartments=[apt(57797, 35852)]), ok(apt(57797, 35852, fields=ACTIVIST_FIELDS))]
     data = turn(client, "change Herzl 10 to Jewish")
     assert searched(fake_crm) == ["Herzl 10"]
@@ -269,12 +293,12 @@ def test_change_with_one_apartment_opens_it_and_saves_nothing(client, fake_crm):
     assert {r.method for r in fake_crm.requests} == {"GET"}
 
 
-def test_change_with_several_matches_lists_them(client, fake_crm):
-    fake_crm.answers.append(found(apartments=[apt(1, 1), apt(2, 2)]))
-    data = turn(client, "change Herzl to Jewish")
+def test_edit_apartment_with_several_matches_lists_only_apartments(client, fake_crm, ai):
+    ai.understandings.append({"action": "edit_apartment", "person": "Herzl"})
+    fake_crm.answers.append(found(people=[person()], apartments=[apt(1, 1), apt(2, 2)]))
+    data = turn(client, "change something at Herzl")
     assert data["intent"] == "search" and "Choose the record you want to change:" in data["prompt"]
-    assert len(fake_crm.requests) == 1
-
+    assert {c["group"] for c in data["choices"]} == {"apartments"} and len(fake_crm.requests) == 1
 
 # --- opening a result ----------------------------------------------------------------
 

@@ -163,6 +163,8 @@ MESSAGES = {
         "choose_apartment": "I found several apartments. Which one?",
         "truncated": "(Only the first {count} are shown - type a more exact address to narrow it down.)",
         "pick_number": "Please choose one of the numbers shown.",
+        "field_unclear": "I couldn't tell which field \"{words}\" is - please choose it from the list.",
+        "value_unclear": "I couldn't use \"{value}\" as the {label} - please choose or type the value.",
         "resident": " - {name}",
         "choose_field": "Which field do you want to change?",
         "no_fields": "Nothing in this apartment can be edited by you here. Nothing was changed.",
@@ -248,6 +250,8 @@ MESSAGES = {
         "choose_apartment": "מצאתי כמה דירות. איזו מהן?",
         "truncated": "(מוצגות רק {count} הראשונות - כתבו כתובת מדויקת יותר כדי לצמצם.)",
         "pick_number": "אנא בחרו אחד מהמספרים שמוצגים.",
+        "field_unclear": "לא הצלחתי לדעת איזה שדה הוא \"{words}\" - בחרו אותו מהרשימה.",
+        "value_unclear": "לא הצלחתי להשתמש ב-\"{value}\" בתור {label} - בחרו או כתבו את הערך.",
         "resident": " - {name}",
         "choose_field": "איזה שדה תרצו לשנות?",
         "no_fields": "אין בדירה הזו שום שדה שאתם יכולים לערוך כאן. לא שונה דבר.",
@@ -620,6 +624,81 @@ def typed_date(text: str) -> tuple[bool, Value, str]:
     return True, text, ""
 
 
+# --- the user's own words, from an understood request (docs/instructions21.md) ------------
+# The interpreter never names CRM fields: these match the user's words against the labels and
+# options the CRM sent. Nothing here keeps a field name; a doubtful match is asked about.
+
+def _forms(text: str) -> set[str]:
+    """The words, and without a joined Hebrew "ה" / "ל" ("הטלפון" -> "טלפון", "לאנגלית" -> "אנגלית")."""
+    words = _normalized(text).strip(" .,:;!?\"'")
+    forms = {words} if words else set()
+    if re.match(r"^[הל]-?\w{2,}", words):
+        forms.add(words[1:].lstrip("-"))
+    return forms
+
+
+def _whole(part: str, text: str) -> bool:
+    return re.search(r"(?<!\w)" + re.escape(part) + r"(?!\w)", text) is not None
+
+
+def match_words(words: str, labels: list[str]) -> list[int]:
+    """Indexes of the labels the words name: exact matches (also without a joined ה/ל) win;
+    otherwise every label found as whole words inside the words, or the words inside the label."""
+    forms = _forms(words)
+    labels = [_normalized(str(label)) for label in labels]
+    exact = [i for i, label in enumerate(labels) if label in forms]
+    if exact:
+        return exact
+    return [i for i, label in enumerate(labels) if label and any(_whole(label, f) or _whole(f, label) for f in forms)]
+
+
+def understood_value(words: str, field: EditableField) -> tuple[bool, Value, str]:
+    """A value the user wrote in a sentence -> (understood, value, message key). Stricter than
+    pick_value: no list numbers (a "3" in a sentence is not option 3), never a clear, an option
+    only when exactly one matches, a date only when it is a real day."""
+    kind = field.kind
+    if re.fullmatch(r"\[.*\]", words.strip()):
+        return False, None, "value_unclear"  # a button's code ([clear], [skip] ...) is never a typed value
+    if kind == "single_option":
+        hits = match_words(words, [option_label(o) for o in field.options])
+        return (True, field.options[hits[0]].value, "") if len(hits) == 1 else (False, None, "value_unclear")
+    if kind == "yes_no":
+        understood, value, _ = pick_value(words, field, clearable=False)
+        return (understood and words.strip() not in ("1", "2"), value, "value_unclear")
+    if kind == "date":
+        understood, value, _ = typed_date(words.strip())
+        try:
+            datetime.date.fromisoformat(str(value))
+            return understood, value, ""
+        except ValueError:
+            return False, None, "value_unclear"
+    if kind == "number":
+        number = words.strip()
+        return (True, number, "") if re.fullmatch(r"-?\d+(?:[.,]\d+)?", number) else (False, None, "value_unclear")
+    if kind == "text" and words.strip():
+        return True, words.strip(), ""
+    return False, None, "value_unclear"  # multi_option: chosen from the list
+
+
+def plan_edit(lang: str, fields: list[EditableField], field_words: Optional[str],
+              value_words: Optional[str]) -> tuple[Optional[EditableField], bool, Value, str]:
+    """-> (the one field the words name or None, whether the value is understood, the value,
+    a line to show first). The caller asks for the field / the value, or shows the confirm screen;
+    nothing is ever saved without the explicit yes there."""
+    if not field_words:
+        return None, False, None, ""
+    hits = match_words(field_words, [field_label(f) for f in fields])
+    if len(hits) != 1:
+        return None, False, None, say(lang, "field_unclear", words=field_words)
+    field = fields[hits[0]]
+    if not value_words:
+        return field, False, None, ""
+    understood, value, _ = understood_value(value_words, field)
+    if not understood:
+        return field, False, None, say(lang, "value_unclear", value=value_words, label=field_label(field))
+    return field, True, value, ""
+
+
 def value_question(lang: str, field: EditableField, current: str, clearable: bool) -> tuple[str, list, Optional[list],
                                                                                             Optional[dict]]:
     """(question, numbered items, buttons or None for the default ones, the clear button or None)."""
@@ -686,7 +765,8 @@ def _ask_value(state: ApartmentEditState, apt: Apartment, field: EditableField, 
                    multi=field.kind == "multi_option", clear=clear)
 
 
-def _confirm_screen(state: ApartmentEditState, apt: Apartment, field: EditableField, value) -> dict:
+def _confirm_screen(state: ApartmentEditState, apt: Apartment, field: EditableField, value,
+                    intro: str = "") -> dict:
     lang = state.language
     label = field_label(field)
     state.step = "confirm"
@@ -695,7 +775,7 @@ def _confirm_screen(state: ApartmentEditState, apt: Apartment, field: EditableFi
                                   new_text=value_text(lang, field, value))
     reply = say(lang, "confirm", label=label, place=place(lang, apt), old=state.pending.old_text,
                 new=state.pending.new_text)
-    return _answer(state, "confirm", reply, choices=yes_no_buttons(lang))
+    return _answer(state, "confirm", reply, intro=intro, choices=yes_no_buttons(lang))
 
 
 # --- CRM steps -----------------------------------------------------------------
@@ -750,19 +830,29 @@ def _reread(token: str, state: ApartmentEditState):
     return apt, None
 
 
-def open_apartment(token: str, language: str, lineage_id: int) -> dict:
+def open_apartment(token: str, language: str, lineage_id: int, field_words: Optional[str] = None,
+                   value_words: Optional[str] = None) -> dict:
     """An apartment picked from the combined search (docs/instructions20.md): read it fresh
-    by its lineage id and ask which field to change."""
-    return _open_lineage(token, ApartmentEditState(language=language), lineage_id)
+    by its lineage id and ask which field to change. With the user's own words from an
+    understood request (docs/instructions21.md): the field they named is chosen, and with a
+    value the CRM supports the confirm screen is shown - still saved only after a yes."""
+    return _open_lineage(token, ApartmentEditState(language=language), lineage_id, field_words, value_words)
 
 
-def _open_lineage(token: str, state: ApartmentEditState, lineage_id: int) -> dict:
+def _open_lineage(token: str, state: ApartmentEditState, lineage_id: int, field_words: Optional[str] = None,
+                  value_words: Optional[str] = None) -> dict:
     apt, failure = _read_lineage(token, state, lineage_id)
     if failure:
         return failure
     if apt is None:
         return _gone(state)
-    return _ask_field(state, apt, intro=apartment_text(state.language, apt))
+    intro = apartment_text(state.language, apt)
+    field, understood, value, prefix = plan_edit(state.language, apt.fields, field_words, value_words)
+    if field is None:
+        return _ask_field(state, apt, prefix=prefix, intro=intro)
+    if not understood:
+        return _ask_value(state, apt, field, prefix=prefix, intro=intro)
+    return _confirm_screen(state, apt, field, value, intro=intro)
 
 
 def _reload(token: str, state: ApartmentEditState, message: str, ask_value_for: Optional[str] = None) -> dict:

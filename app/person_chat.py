@@ -25,6 +25,13 @@ they all come from the CRM, in the user's language.
   asked in this phase. A draft contact (`can_add_visit` false) is not offered
   a visit.
 
+From an understood request (docs/instructions21.md, app/search_chat.py): the
+user's own words are matched against the CRM's labels and options here
+(apartment_chat.plan_edit / match_words) - "change Dana's phone to 050..." opens
+on the confirm screen; "tefillin for John today" starts the visit with Tefillin
+ticked and the date set, both shown on the confirm screen like any other value.
+A doubtful field or value is asked about, showing the real choices.
+
 Every write carries a request_id, made at the first yes and kept until the
 CRM's answer settles it. A lost answer BLOCKS the flow; the next yes sends the
 same request_id with the same body, which the CRM answers from its record
@@ -38,8 +45,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app import apartment_chat, crm_api
 from app.apartment_chat import (CLEAR_MESSAGE, EditableField, Value, field_label, field_lines, fingerprint,
-                                invalid_reasons, is_reused, link, numbered, pick_field, pick_index, pick_value,
-                                typed_date, value_question, value_text, yes_no_buttons)
+                                invalid_reasons, is_reused, link, match_words, numbered, pick_field, pick_index,
+                                pick_value, plan_edit, typed_date, understood_value, value_question, value_text,
+                                yes_no_buttons)
 from app.contact_chat import is_explicit_no, is_explicit_yes
 
 Language = Literal["en", "he"]
@@ -56,6 +64,8 @@ VISIT_MESSAGE = "[visit]"
 SKIP_MESSAGE = "[skip]"
 FINISH_MESSAGE = "[finish]"
 DEFAULT_MESSAGE = "[default]"
+# A visit date written as these words is the CRM's default date (today).
+TODAY_WORDS = ("today", "היום")
 
 
 class VisitField(BaseModel):
@@ -121,6 +131,8 @@ class VisitDraft(BaseModel):
     # Once sent: the exact body's values and its request_id, resent unchanged after a lost answer.
     sent: Optional[dict[str, Value]] = None
     request_id: Optional[str] = None
+    # Answers taken from the user's own request: their questions are not asked again.
+    prefilled: list[str] = Field(default_factory=list)
 
 
 class PersonState(BaseModel):
@@ -190,6 +202,8 @@ MESSAGES = {
                               "Reply \"yes\" to ask the CRM, or \"no\" to stop.",
         "visit_not_sent": "I couldn't reach the CRM, so the visit was not sent. Reply \"yes\" to try again, "
                           "or \"no\" to cancel.",
+        "from_message": "From your message: {items}.",
+        "contacts_missing": "Opening a person in the chat isn't available on this CRM yet. Nothing was changed.",
     },
     "he": {
         "menu": "מה תרצו לעשות?",
@@ -239,6 +253,8 @@ MESSAGES = {
         "visit_blocked_wait": "קודם צריך לברר את הביקור הקודם, שהתשובה עליו אבדה. "
                               "השיבו \"כן\" כדי לשאול את ה-CRM, או \"לא\" כדי להפסיק.",
         "visit_not_sent": "לא הצלחתי להגיע ל-CRM, ולכן הביקור לא נשלח. השיבו \"כן\" כדי לנסות שוב, או \"לא\" כדי לבטל.",
+        "from_message": "מההודעה שלכם: {items}.",
+        "contacts_missing": "פתיחת אדם בצ'אט עדיין אינה זמינה ב-CRM הזה. לא שונה דבר.",
     },
 }
 
@@ -330,13 +346,64 @@ def _answer(state: PersonState, outcome: str, prompt: str, *, intro: str = "", i
     return answer
 
 
-def open_person(token: str, language: str, contact_id: int) -> dict:
-    """A person picked from the combined search: read them fresh and offer what can be done."""
+def open_person(token: str, language: str, contact_id: int, *, edit: bool = False, visit: bool = False,
+                field_words: Optional[str] = None, value_words: Optional[str] = None,
+                date_words: Optional[str] = None, notes: Optional[str] = None) -> dict:
+    """A person picked from the combined search: read them fresh and offer what can be done.
+    From an understood request: `edit` goes to the field the user named (and with a value the
+    CRM supports, to the confirm screen); `visit` starts the visit questions with what the user
+    already said filled in. Nothing is saved without the explicit yes on a confirm screen."""
     state = PersonState(language=language, contact_id=contact_id)
     contact, failure = _read(token, state)
     if failure:
         return failure
-    return _menu(state, contact, intro=contact_text(language, contact))
+    intro = contact_text(language, contact)
+    if visit and contact.can_add_visit:
+        state.visit = VisitDraft(shown=_visit_fingerprint(contact))
+        noted = _prefill_visit(language, contact, state.visit, field_words, value_words, date_words, notes)
+        start = say(language, "visit_start", name=person_name(language, contact))
+        if noted:
+            start += "\n" + say(language, "from_message", items=", ".join(noted))
+        return _ask_visit(state, contact, intro=start)
+    if not edit:
+        return _menu(state, contact, intro=intro)  # also a visit for a draft: the menu says why not
+    field, understood, value, prefix = plan_edit(language, contact.fields, field_words, value_words)
+    if field is None:
+        return _ask_field(state, contact, prefix=prefix, intro=intro)
+    if not understood:
+        return _ask_value(state, contact, field, prefix=prefix, intro=intro)
+    return _confirm_screen(state, contact, field, value, intro=intro)
+
+
+def _prefill_visit(lang: str, contact: Contact, visit: VisitDraft, field_words: Optional[str],
+                   value_words: Optional[str], date_words: Optional[str], notes: Optional[str]) -> list[str]:
+    """Fill the visit with what the user's request already says, matched against the CRM's own
+    visit fields: a yes/no field it names is ticked; a date it gives is set; a named field with a
+    value the CRM supports is set. -> the lines to show ("Tefillin ✓", "Date: 2026-11-03")."""
+    noted = []
+    said = [t for t in (field_words, notes) if t]
+    for f in contact.visit_fields:
+        label = field_label(f)
+        value = None
+        if f.kind == "yes_no":
+            if any(match_words(t, [label]) for t in said):
+                visit.values[f.field_key] = True
+                noted.append(f"{label} {say(lang, 'done_mark')}")
+            continue
+        if f.kind == "date" and date_words:
+            if date_words.strip().casefold() in TODAY_WORDS and isinstance(f.default, str):
+                value = f.default
+            else:
+                understood, typed, _ = understood_value(date_words, f)
+                value = typed if understood else None
+        elif field_words and value_words and match_words(field_words, [label]):
+            understood, typed, _ = understood_value(value_words, f)
+            value = typed if understood else None
+        if value is not None:
+            visit.values[f.field_key] = value
+            visit.prefilled.append(f.field_key)
+            noted.append(f"{label}: {value_text(lang, f, value)}")
+    return noted
 
 
 def handle_turn(token: str, message: str, state: PersonState) -> dict:
@@ -450,7 +517,7 @@ def _ask_value(state: PersonState, contact: Contact, field: EditableField, prefi
     return _answer(state, "choose_value", prompt, intro=intro, items=items, choices=choices, clear=clear)
 
 
-def _confirm_screen(state: PersonState, contact: Contact, field: EditableField, value) -> dict:
+def _confirm_screen(state: PersonState, contact: Contact, field: EditableField, value, intro: str = "") -> dict:
     lang = state.language
     label = field_label(field)
     state.step = "confirm"
@@ -459,7 +526,7 @@ def _confirm_screen(state: PersonState, contact: Contact, field: EditableField, 
                                 new_text=value_text(lang, field, value))
     reply = say(lang, "confirm", label=label, name=person_name(lang, contact), old=state.pending.old_text,
                 new=state.pending.new_text)
-    return _answer(state, "confirm", reply, choices=yes_no_buttons(lang))
+    return _answer(state, "confirm", reply, intro=intro, choices=yes_no_buttons(lang))
 
 
 def _send_edit(token: str, state: PersonState) -> dict:
@@ -527,6 +594,8 @@ def _ask_visit(state: PersonState, contact: Contact, prefix: str = "", intro: st
     lang = state.language
     state.step = "visit"
     steps = visit_steps(contact)
+    while state.visit.position < len(steps) and steps[state.visit.position] in state.visit.prefilled:
+        state.visit.position += 1  # already answered by the user's own request
     if state.visit.position >= len(steps):
         return _visit_confirm(state, contact, intro=intro)
     step = steps[state.visit.position]
@@ -535,9 +604,13 @@ def _ask_visit(state: PersonState, contact: Contact, prefix: str = "", intro: st
     pre = prefix + "\n" if prefix else ""
     if step == YES_NO_STEP:
         boxes = [f for f in contact.visit_fields if f.kind == "yes_no"]
-        items = numbered([field_label(f) for f in boxes])
-        return _answer(state, "visit", pre + say(lang, "visit_yes_no"), intro=intro, items=items, multi=True,
-                       clear={"label": say(lang, "none_ticked"), "message": SKIP_MESSAGE})
+        ticked = [state.visit.values.get(f.field_key) is True for f in boxes]
+        lines = numbered([field_label(f) for f in boxes])
+        # Ticked already (from the user's request): checked boxes on the page, a ✓ in the text.
+        items = [line + (" " + say(lang, "done_mark") if t else "") for line, t in zip(lines, ticked)]
+        choices = [{"label": line, "message": str(i), "checked": t} for i, (line, t) in enumerate(zip(lines, ticked), 1)]
+        return _answer(state, "visit", pre + say(lang, "visit_yes_no"), intro=intro, items=items, choices=choices,
+                       multi=True, clear={"label": say(lang, "none_ticked"), "message": SKIP_MESSAGE})
     field = _visit_field(contact, step)
     label = field_label(field)
     if field.kind == "date":
@@ -761,6 +834,8 @@ def _failure(state: PersonState, body: dict) -> dict:
         return _answer(PersonState(language=lang), "unauthorized", say(lang, "unauthorized"), logout=True)
     if status == "forbidden":
         return _answer(PersonState(language=lang), "forbidden", say(lang, "forbidden"), done=True)
+    if status == "contacts_missing":
+        return _answer(PersonState(language=lang), status, say(lang, status), done=True)
     if status in ("crm_not_configured", "crm_unreachable", "crm_timeout"):
         return _answer(state, status, say(lang, status))
     return _answer(state, "crm_failed", say(lang, "crm_failed", status=status or "unknown"))

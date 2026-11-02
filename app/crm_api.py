@@ -481,7 +481,11 @@ def _read(path: str, token: str, params: dict | None = None) -> tuple[BridgeResu
     if failure:
         return failure, None
     if code == 404:
-        return _failure(404, "not_found", "No such apartment for this user."), None
+        failure = _failure(404, "not_found", "No such apartment for this user.")
+        # The web framework's own answer for a path it doesn't have: the route is missing on this
+        # CRM (its routes answer a record they won't show with their own words, e.g. "Contact not found").
+        failure.body["route_missing"] = _crm_detail(response) == "Not Found"
+        return failure, None
     try:
         data = response.json()
     except ValueError:
@@ -666,6 +670,8 @@ def get_contact(token: str, contact_id: int) -> BridgeResult:
         return _failure(404, "not_found", "No such contact for this user.")
     failure, data = _read(f"{CONTACTS_PATH}/{contact_id}", token)
     if failure:
+        if failure.body.pop("route_missing", False):
+            return _failure(502, "contacts_missing", "This CRM does not offer the assistant contact routes yet.")
         if failure.body["status"] == "not_found":
             failure.body["message"] = "No such contact for this user."
         return failure

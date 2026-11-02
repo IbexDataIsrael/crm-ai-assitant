@@ -401,8 +401,9 @@ const noSave = calls => !calls.some(c => c.url === "/assistant/language");
     const declined = calls.filter(c => c.url === "/assistant/turn").pop();
     check("No to the offer: sent as a search turn with the offer state", declined.body.intent === "search"
       && declined.body.message === "no" && declined.body.search_state.offer_add === true);
-    // Yes to the offer: the add-contact path, with cancel.
-    next = () => searchAnswer([{ label: "Yes", action: "add_person" }, { label: "No", action: "dismiss" }],
+    // Yes to the offer: the add-contact path, with cancel, carrying the user's own words.
+    next = () => searchAnswer([{ label: "Yes", action: "add_person", message: "Moshe Levi, 050-1234567" },
+                               { label: "No", action: "dismiss" }],
                               { outcome: "no_match", search_state: { offer_add: true, language: "en" } });
     await type("Nobody");
     next = () => [200, { intent: "create_contact", outcome: "started", reply: "Let's create a new contact.",
@@ -410,7 +411,7 @@ const noSave = calls => !calls.some(c => c.url === "/assistant/language");
     log(document).all().filter(n => n.tag === "button" && n.textContent === "Yes" && !n.disabled).pop().click();
     await settle();
     const add = calls.filter(c => c.url === "/assistant/turn").pop();
-    check("Yes to the offer starts adding (empty message)", add.body.intent === "create_contact" && add.body.message === "");
+    check("Yes to the offer starts adding with the typed details", add.body.intent === "create_contact" && add.body.message === "Moshe Levi, 050-1234567");
     check("adding: cancel shown", !$(document, "cancel").classList.contains("hidden"));
     // A search the server hands over to the apartment flow ("change 2C to English").
     $(document, "cancel").click();

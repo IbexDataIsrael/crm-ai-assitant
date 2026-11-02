@@ -82,6 +82,14 @@ def turn(client, message="", state=None, intent="create_contact", headers=AUTH, 
     return client.post("/assistant/turn", json=body, headers=headers)
 
 
+@pytest.fixture(autouse=True)
+def no_contact_routes(monkeypatch):
+    """These tests end at the add flow's own answer. After a save the route opens the new contact
+    for more fields; that hand-off is tested in tests/test_interpreter.py."""
+    from app import person_chat
+    monkeypatch.setattr(person_chat, "open_person", lambda *a, **k: {"outcome": "contacts_missing"})
+
+
 def confirm_requests(fake_crm):
     return [r for r in fake_crm.requests if r.url.path.endswith("/confirm")]
 
