@@ -86,7 +86,7 @@ def test_results_count_first_then_people_and_apartments_with_ids(client, fake_cr
     assert reply[1] == "People:" and reply[4] == "Apartments:"
     assert reply[2] == "- Yosef Cohen - Herzl 10, Tel Aviv (#5)"
     assert reply[3] == "- Yosefa Cohen [Draft] (#6)"
-    assert reply[5] == "- Herzl 10, Tel Aviv, apartment 3, floor 1 - Cohen (#57797)"
+    assert reply[5] == "- Herzl 10, Tel Aviv, apartment 3, floor 1 - Cohen"  # never the internal id
     assert [(c["action"], c["id"], c["group"]) for c in data["choices"]] == [
         ("open_person", 5, "people"), ("open_person", 6, "people"), ("open_apartment", 35852, "apartments")]
     assert data["search_state"] == {"offer_add": False, "language": "en"}
@@ -303,31 +303,24 @@ def test_open_id_must_be_a_positive_number(client, fake_crm, open_id):
     assert response.status_code == 422 and fake_crm.requests == []
 
 
-def test_a_person_opens_as_a_link_to_the_crm_page(client, fake_crm, monkeypatch):
-    monkeypatch.setenv("CRM_WEB_URL", "https://app.example.org/")
-    response = client.post("/assistant/turn", headers=AUTH,
-                           json={"intent": "open_person", "message": "", "open_id": 5})
-    data = response.json()
-    assert data["outcome"] == "not_available"
-    assert data["link"]["url"] == "https://app.example.org/dashboard/contacts/5"
-    assert fake_crm.requests == []  # no contact endpoint is called (none exists yet)
-
-
-@pytest.mark.parametrize("value", ["", "ftp://x", "https://user:pw@x.org", "https://x.org/?a=1", "not a url"])
-def test_no_link_without_a_usable_crm_web_url(client, fake_crm, monkeypatch, value):
-    monkeypatch.setenv("CRM_WEB_URL", value)
+def test_a_person_picked_from_the_results_is_opened_from_the_crm(client, fake_crm):
+    """The person flow itself is tested in tests/test_person_chat.py."""
+    fake_crm.answers.append(httpx.Response(404, json={"detail": "Contact not found"}))
     data = client.post("/assistant/turn", headers=AUTH,
-                       json={"intent": "open_person", "message": "", "open_id": 5}).json()
-    assert "link" not in data and "CRM_WEB_URL" in data["reply"]
+                       json={"intent": "person", "message": "", "open_id": 5}).json()
+    (request,) = fake_crm.requests
+    assert request.method == "GET" and request.url.path == "/api/assistant/contacts/5"
+    assert data["intent"] == "person" and data["outcome"] == "gone"
 
 
-@pytest.mark.parametrize("role", ["shliach", "campaign_manager", None])
+@pytest.mark.parametrize("role", ["shliach", "campaign_manager", None, "superadmin"])
 def test_a_person_is_never_opened_for_other_roles(client, fake_crm, monkeypatch, role):
     monkeypatch.setenv("CRM_WEB_URL", "https://app.example.org")
     as_role(fake_crm, role)
     data = client.post("/assistant/turn", headers=AUTH,
-                       json={"intent": "open_person", "message": "", "open_id": 5}).json()
-    assert "link" not in data and "/dashboard/contacts" not in data["reply"]
+                       json={"intent": "person", "message": "", "open_id": 5}).json()
+    assert data["outcome"] == "forbidden" and "link" not in data
+    assert fake_crm.requests == []  # refused before any contact call
 
 
 # --- CRM failures ----------------------------------------------------------------------
@@ -369,4 +362,4 @@ def test_hebrew_replies_have_no_english_sentences(client, fake_crm):
     english = re.compile(r"[A-Za-z]{2,}(?:[ ,'-]+[A-Za-z]{2,}){2,}")
     for key, text in search_chat.MESSAGES["he"].items():
         if isinstance(text, str) and key not in ("person_line",):
-            assert not english.search(text.replace("CRM_WEB_URL", "").replace("CRM_API_URL", "")), key
+            assert not english.search(text.replace("CRM_API_URL", "")), key

@@ -1,37 +1,42 @@
-"""The edit-an-apartment conversation (sheepsidebay_crm docs/fixes115.md;
-docs/instructions18.md).
+"""The edit-an-apartment conversation (sheepsidebay_crm docs/fixes115.md and
+fixes118.md; docs/instructions18.md).
 
 Stateless on the server, like the add-contact conversation
 (app/contact_chat.py): the page holds the state and sends it with every turn;
 the token comes separately and goes only to the bridge (app/crm_api.py).
 
 The CRM decides which fields this user may edit on this apartment
-(`editable_fields` in every apartment it returns), with their labels, kinds,
-current values and options. Nothing here keeps a field name, label or option
-list: the state holds only ids, the chosen field_key and the change waiting
-for a yes. Every turn after the apartment is chosen re-reads it by lineage, so
-the list is always the CRM's current one; if the list (or the apartment
-version) differs from what the user was shown, the user is shown the new one
-and asked again - a number typed for an old list is never applied.
+(`editable_fields` in every apartment it returns), with their labels (one
+`label`, in the user's CRM language), kinds, current values and options.
+Nothing here keeps a field name, label or option list: the state holds only
+ids, the chosen field_key and the change waiting for a yes. Every turn after
+the apartment is chosen re-reads it by lineage, so the list is always the
+CRM's current one; if the list (or the apartment version) differs from what
+the user was shown, the user is shown the new one and asked again - a number
+typed for an old list is never applied.
 
 Steps: address -> (choose_apartment) -> choose_field -> choose_value ->
 confirm (old value -> new value, explicit yes) -> update -> the CRM's answer.
 
 Safety rules:
 - One update per explicit yes. The page disables input while a turn is in
-  flight, and nothing here ever resends an update by itself.
+  flight, and nothing here ever sends a new update by itself.
+- Every confirmed change carries a request_id (fixes118 decision 6), made at
+  the first yes and kept in the state until the CRM's answer settles it.
 - 409 (changed meanwhile) or 404: re-read by lineage (an apartment's id
   changes on every edit, its lineage id never does), show the current state,
-  ask again. Never resend automatically.
+  ask again.
 - A lost answer (timeout, dropped connection, CRM 5xx, unreadable 2xx): the
-  edit is BLOCKED. Nothing is resent; "yes" re-reads the lineage. Only if the
-  CRM shows the value that was sent is it reported saved.
+  edit is BLOCKED. The next "yes" sends the SAME request_id with the SAME
+  body: the CRM answers from its record (`replayed`) and can never save it
+  twice, so its answer is the proof. A matching value alone never is.
 
 Wire values (sheepsidebay_crm backend/app/apartment_edit_rules.py parse_value):
-yes_no is a JSON boolean; null clears text / number / date / yes_no; an empty
-list clears multi_option; single_option can't be cleared. text and number are
-sent as typed and checked by the CRM; a date typed day first (29/10/2026,
-29.10.2026, 29-10-2026) is sent as 2026-10-29, anything else as typed.
+yes_no is a JSON boolean and single_option one option value, neither ever
+cleared; an empty list clears multi_option; null clears text / number / date.
+text and number are sent as typed and checked by the CRM; a date typed day
+first (29/10/2026, 29.10.2026, 29-10-2026) is sent as 2026-10-29, anything
+else as typed.
 
 Clearing is only through the page's "Clear the value" button (owner's choice,
 29 Oct 2026): the button sends CLEAR_MESSAGE, so a typed "none" is an ordinary
@@ -42,6 +47,7 @@ import datetime
 import hashlib
 import json
 import re
+import uuid
 from typing import Any, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictFloat, StrictInt, StrictStr
@@ -52,7 +58,7 @@ from app.contact_chat import is_explicit_no, is_explicit_yes
 Language = Literal["en", "he"]
 Step = Literal["address", "choose_apartment", "choose_field", "choose_value", "confirm", "blocked"]
 KINDS = ("single_option", "multi_option", "text", "number", "date", "yes_no")
-CLEARABLE = ("multi_option", "text", "number", "date", "yes_no")
+CLEARABLE = ("multi_option", "text", "number", "date")
 
 # Sent only by the page's "Clear the value" button; empties a field (where the CRM allows it).
 CLEAR_MESSAGE = "[clear]"
@@ -70,7 +76,6 @@ class Option(BaseModel):
 
     value: Union[StrictInt, StrictStr]
     label: Optional[str] = None
-    label_en: Optional[str] = None
 
 
 class EditableField(BaseModel):
@@ -80,14 +85,13 @@ class EditableField(BaseModel):
 
     field_key: str
     label: Optional[str] = None
-    label_en: Optional[str] = None
     kind: str
     current_value: Any = None
     options: list[Option] = Field(default_factory=list)
 
 
 class Apartment(BaseModel):
-    """A CRM apartment result (search, by-lineage or the update answer)."""
+    """A CRM apartment result (search, getapartment or the update answer)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -97,6 +101,9 @@ class Apartment(BaseModel):
     apartment_name: Optional[str] = None
     floor: Optional[str] = None
     resident_name: Optional[str] = None
+    # The CRM web page that always opens the current version (fixes118 decision 8); checked
+    # only when a link is built (crm_api.web_link), so an odd value just means no link.
+    web_path: Any = None
     editable_fields: list[EditableField] = Field(default_factory=list)
 
     @property
@@ -125,6 +132,10 @@ class PendingChange(BaseModel):
     label: str = ""
     old_text: str = ""
     new_text: str = ""
+    # Made at the first yes; the same id goes with the same body until the CRM settles it.
+    request_id: Optional[str] = None
+    # The version the update was sent for (part of what the CRM matches a request_id with).
+    apartment_id: Optional[int] = None
 
 
 class ApartmentEditState(BaseModel):
@@ -152,7 +163,6 @@ MESSAGES = {
         "choose_apartment": "I found several apartments. Which one?",
         "truncated": "(Only the first {count} are shown - type a more exact address to narrow it down.)",
         "pick_number": "Please choose one of the numbers shown.",
-        "apartment": "Apartment #{id}: {address}",
         "resident": " - {name}",
         "choose_field": "Which field do you want to change?",
         "no_fields": "Nothing in this apartment can be edited by you here. Nothing was changed.",
@@ -170,7 +180,7 @@ MESSAGES = {
         "not_understood_value": "I didn't understand that value.",
         "bad_date": "That is not a real date. Type it day first, for example 29/10/2026.",
         "cannot_clear": "This field can't be left empty - choose one of the values.",
-        "confirm": "Change {label} of apartment #{id}:\nfrom: {old}\nto: {new}\n\n"
+        "confirm": "Change {label} of {place}:\nfrom: {old}\nto: {new}\n\n"
                    "Reply \"yes\" to save this change, or \"no\" to keep the current value.",
         "confirm_wait": "Reply \"yes\" to save exactly this change, or \"no\" to keep the current value.",
         "kept": "Not changed - {label} stays {old}.",
@@ -187,17 +197,17 @@ MESSAGES = {
         "read_forbidden": "The CRM did not allow this request. Nothing was changed.",
         "invalid": "The CRM did not accept the value. Nothing was saved.\n{reason}",
         "forbidden": "The CRM says {label} can't be edited here. Nothing was saved. I reloaded the apartment:",
-        "uncertain": "The CRM's answer was lost, so I don't know whether the change was saved. "
-                     "I won't send it again. Reply \"yes\" to read the apartment's current state, "
+        "reused": "The CRM refused the request because its request id was already used for a different "
+                  "change. Nothing was saved. This is a fault in the assistant; please start the change again.",
+        "uncertain": "The CRM's answer was lost, so I don't know yet whether the change was saved. "
+                     "Reply \"yes\" to ask the CRM (it can never save this change twice), "
                      "or \"no\" to stop.",
         "blocked_wait": "First I need to settle the earlier change, whose answer was lost. "
-                        "Reply \"yes\" to check it, or \"no\" to stop.",
-        "confirmed": "Checked: the CRM shows the change was saved ({label}: {value}).",
-        "not_confirmed": "The CRM currently shows {label}: {current}. Your change ({wanted}) does not show. "
-                         "It was probably not saved, but I can't be sure. Reply \"yes\" to check again, "
-                         "or \"no\" to stop.",
-        "not_visible": "The CRM no longer lists {label} as editable for you, so I can't see whether your "
-                       "change ({wanted}) was saved. Reply \"yes\" to check again, or \"no\" to stop.",
+                        "Reply \"yes\" to ask the CRM, or \"no\" to stop.",
+        "still_unknown": "Still no answer from the CRM, so it is still unknown whether the change was saved. "
+                         "Reply \"yes\" to ask again, or \"no\" to stop.",
+        "confirmed": "Checked: the CRM confirms the change was saved. It now shows {label}: {value}.",
+        "confirmed_unchanged": "Checked: the CRM already had {label}: {value}, so nothing needed saving.",
         "stopped_blocked": "Stopped. Please check the apartment in the CRM before editing it again.",
         "not_sent": "I couldn't reach the CRM, so the change was not sent. Reply \"yes\" to try again, "
                     "or \"no\" to keep the current value.",
@@ -211,16 +221,24 @@ MESSAGES = {
         "yes": "Yes",
         "no": "No",
         "clear": "Clear the value",
+        "open_link": "Open in the CRM",
         "address_parts": "{address}, apartment {number}, floor {floor}",
+        "place": "{address}, apartment {number}",
         "code": {
             "expected_option": "{label}: choose one of the listed values.",
             "expected_list": "{label}: choose one or more of the listed values.",
             "value_not_allowed": "{label}: this value is not one of the allowed values.",
             "expected_text": "{label}: this field takes text.",
             "expected_number": "{label}: this field takes a number (for example 12 or 3.5).",
+            "expected_whole_number": "{label}: this field takes a whole number.",
             "expected_date": "{label}: this field takes a date like 2026-10-29.",
             "expected_yes_no": "{label}: this field takes yes or no.",
             "invalid_format": "{label}: the format is not valid.",
+            "required": "{label}: this field can't be left empty.",
+            "too_long": "{label}: the value is too long (at most {max_length} characters).",
+            "invalid_phone": "{label}: this is not a valid phone number.",
+            "phone_taken": "{label}: another contact already has this phone number.",
+            "invalid_email": "{label}: this is not a valid email address.",
             "other": "{label}: the value was refused ({code}).",
         },
     },
@@ -230,7 +248,6 @@ MESSAGES = {
         "choose_apartment": "מצאתי כמה דירות. איזו מהן?",
         "truncated": "(מוצגות רק {count} הראשונות - כתבו כתובת מדויקת יותר כדי לצמצם.)",
         "pick_number": "אנא בחרו אחד מהמספרים שמוצגים.",
-        "apartment": "דירה #{id}: {address}",
         "resident": " - {name}",
         "choose_field": "איזה שדה תרצו לשנות?",
         "no_fields": "אין בדירה הזו שום שדה שאתם יכולים לערוך כאן. לא שונה דבר.",
@@ -246,7 +263,7 @@ MESSAGES = {
         "not_understood_value": "לא הבנתי את הערך.",
         "bad_date": "זה אינו תאריך קיים. כתבו אותו יום קודם, למשל 29/10/2026.",
         "cannot_clear": "אי אפשר להשאיר את השדה הזה ריק - בחרו אחד מהערכים.",
-        "confirm": "שינוי {label} בדירה #{id}:\nמ: {old}\nל: {new}\n\n"
+        "confirm": "שינוי {label} ב{place}:\nמ: {old}\nל: {new}\n\n"
                    "השיבו \"כן\" כדי לשמור את השינוי, או \"לא\" כדי להשאיר את הערך הנוכחי.",
         "confirm_wait": "השיבו \"כן\" כדי לשמור בדיוק את השינוי הזה, או \"לא\" כדי להשאיר את הערך הנוכחי.",
         "kept": "לא שונה - {label} נשאר {old}.",
@@ -260,14 +277,17 @@ MESSAGES = {
         "read_forbidden": "ה-CRM לא אישר את הבקשה. לא שונה דבר.",
         "invalid": "ה-CRM לא קיבל את הערך. לא נשמר דבר.\n{reason}",
         "forbidden": "ה-CRM מדווח שאי אפשר לערוך כאן את {label}. לא נשמר דבר. טענתי את הדירה מחדש:",
-        "uncertain": "התשובה מה-CRM אבדה, ולכן לא ידוע אם השינוי נשמר. לא אשלח אותו שוב. "
-                     "השיבו \"כן\" כדי לקרוא את המצב הנוכחי של הדירה, או \"לא\" כדי להפסיק.",
-        "blocked_wait": "קודם צריך לברר את השינוי הקודם, שהתשובה עליו אבדה. השיבו \"כן\" כדי לבדוק, או \"לא\" כדי להפסיק.",
-        "confirmed": "נבדק: ב-CRM רואים שהשינוי נשמר ({label}: {value}).",
-        "not_confirmed": "ב-CRM מופיע כרגע {label}: {current}. השינוי שלכם ({wanted}) לא מופיע. "
-                         "כנראה שלא נשמר, אבל אין לי ודאות. השיבו \"כן\" כדי לבדוק שוב, או \"לא\" כדי להפסיק.",
-        "not_visible": "ה-CRM כבר לא מציג לכם את {label} כשדה לעריכה, ולכן אינני רואה אם השינוי שלכם ({wanted}) "
-                       "נשמר. השיבו \"כן\" כדי לבדוק שוב, או \"לא\" כדי להפסיק.",
+        "reused": "ה-CRM דחה את הבקשה כי מזהה הבקשה כבר שימש לשינוי אחר. לא נשמר דבר. "
+                  "זו תקלה בעוזר; אנא התחילו את השינוי מחדש.",
+        "uncertain": "התשובה מה-CRM אבדה, ולכן עדיין לא ידוע אם השינוי נשמר. "
+                     "השיבו \"כן\" כדי לשאול את ה-CRM (הוא לעולם לא ישמור את השינוי הזה פעמיים), "
+                     "או \"לא\" כדי להפסיק.",
+        "blocked_wait": "קודם צריך לברר את השינוי הקודם, שהתשובה עליו אבדה. "
+                        "השיבו \"כן\" כדי לשאול את ה-CRM, או \"לא\" כדי להפסיק.",
+        "still_unknown": "עדיין אין תשובה מה-CRM, ולכן עדיין לא ידוע אם השינוי נשמר. "
+                         "השיבו \"כן\" כדי לשאול שוב, או \"לא\" כדי להפסיק.",
+        "confirmed": "נבדק: ה-CRM מאשר שהשינוי נשמר. מופיע עכשיו {label}: {value}.",
+        "confirmed_unchanged": "נבדק: ב-CRM כבר היה {label}: {value}, ולכן לא היה מה לשמור.",
         "stopped_blocked": "הופסק. אנא בדקו את הדירה ב-CRM לפני שתערכו אותה שוב.",
         "not_sent": "לא הצלחתי להגיע ל-CRM, ולכן השינוי לא נשלח. השיבו \"כן\" כדי לנסות שוב, "
                     "או \"לא\" כדי להשאיר את הערך הנוכחי.",
@@ -281,16 +301,24 @@ MESSAGES = {
         "yes": "כן",
         "no": "לא",
         "clear": "ניקוי הערך",
+        "open_link": "פתיחה ב-CRM",
         "address_parts": "{address}, דירה {number}, קומה {floor}",
+        "place": "{address}, דירה {number}",
         "code": {
             "expected_option": "{label}: בחרו אחד מהערכים ברשימה.",
             "expected_list": "{label}: בחרו ערך אחד או יותר מהרשימה.",
             "value_not_allowed": "{label}: הערך הזה אינו אחד מהערכים המותרים.",
             "expected_text": "{label}: השדה מקבל טקסט.",
             "expected_number": "{label}: השדה מקבל מספר (למשל 12 או 3.5).",
+            "expected_whole_number": "{label}: השדה מקבל מספר שלם.",
             "expected_date": "{label}: השדה מקבל תאריך כמו 2026-10-29.",
             "expected_yes_no": "{label}: השדה מקבל כן או לא.",
             "invalid_format": "{label}: הפורמט אינו תקין.",
+            "required": "{label}: אי אפשר להשאיר את השדה הזה ריק.",
+            "too_long": "{label}: הערך ארוך מדי (עד {max_length} תווים).",
+            "invalid_phone": "{label}: זה אינו מספר טלפון תקין.",
+            "phone_taken": "{label}: למספר הטלפון הזה כבר יש איש קשר אחר.",
+            "invalid_email": "{label}: זו אינה כתובת אימייל תקינה.",
             "other": "{label}: הערך נדחה ({code}).",
         },
     },
@@ -305,6 +333,10 @@ def _normalized(text: str) -> str:
     return " ".join(text.casefold().split())
 
 
+def new_request_id() -> str:
+    return str(uuid.uuid4())
+
+
 # --- display -----------------------------------------------------------------
 
 def full_address(lang: str, apt: Apartment) -> str:
@@ -313,14 +345,19 @@ def full_address(lang: str, apt: Apartment) -> str:
                number=apt.apartment_name or empty, floor=apt.floor or empty)
 
 
-def field_label(lang: str, field: EditableField) -> str:
-    first, second = (field.label, field.label_en) if lang == "he" else (field.label_en, field.label)
-    return first or second or field.field_key
+def place(lang: str, apt: Apartment) -> str:
+    """"<building_address>, apartment <apartment_name>" (fixes118 decision 8): never the internal id."""
+    empty = MESSAGES[lang]["empty"]
+    return say(lang, "place", address=apt.building_address or empty, number=apt.apartment_name or empty)
 
 
-def option_label(lang: str, option: Option) -> str:
-    first, second = (option.label, option.label_en) if lang == "he" else (option.label_en, option.label)
-    return first or second or str(option.value)
+def field_label(field: EditableField) -> str:
+    """The CRM's one label, in the user's language; the key only if the CRM sent none."""
+    return field.label or field.field_key
+
+
+def option_label(option: Option) -> str:
+    return option.label or str(option.value)
 
 
 def _is_empty(value) -> bool:
@@ -337,46 +374,74 @@ def value_text(lang: str, field: Optional[EditableField], value) -> str:
         return MESSAGES[lang]["yes" if value else "no"]
     for option in field.options if field else []:
         if str(option.value) == str(value):
-            return option_label(lang, option)
+            return option_label(option)
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value)  # also an option the admin has since turned off: shown as stored
 
 
+def field_lines(lang: str, fields: list[EditableField]) -> list[str]:
+    return [f"- {field_label(f)}: {value_text(lang, f, f.current_value)}" for f in fields]
+
+
 def apartment_text(lang: str, apt: Apartment) -> str:
-    head = say(lang, "apartment", id=apt.apartment_id, address=full_address(lang, apt))
+    head = full_address(lang, apt)
     if apt.resident_name:
         head += say(lang, "resident", name=apt.resident_name)
-    lines = [f"- {field_label(lang, f)}: {value_text(lang, f, f.current_value)}" for f in apt.fields]
-    return "\n".join([head, *lines])
+    return "\n".join([head, *field_lines(lang, apt.fields)])
 
 
-def _numbered(items: list[str]) -> list[str]:
+def link(lang: str, web_path) -> Optional[dict]:
+    """The "Open in the CRM" link: CRM_WEB_URL + the CRM's own web_path, or None."""
+    url = crm_api.web_link(web_path)
+    return {"label": MESSAGES[lang]["open_link"], "url": url} if url else None
+
+
+def numbered(items: list[str]) -> list[str]:
     return [f"{i}. {text}" for i, text in enumerate(items, 1)]
 
 
-def _fingerprint(data) -> str:
+def fingerprint(data) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
 def _fields_fingerprint(apt: Apartment) -> str:
-    return _fingerprint([apt.apartment_id, [[f.field_key, f.kind] for f in apt.fields]])
+    return fingerprint([apt.apartment_id, [[f.field_key, f.kind] for f in apt.fields]])
 
 
 def _field_fingerprint(apt: Apartment, field: EditableField) -> str:
-    return _fingerprint([apt.apartment_id, field.field_key, field.kind, [o.value for o in field.options]])
+    return fingerprint([apt.apartment_id, field.field_key, field.kind, [o.value for o in field.options]])
+
+
+def invalid_reasons(lang: str, body: dict, label: str) -> str:
+    """The CRM's 422 as one line per refused value, naming the field."""
+    codes = MESSAGES[lang]["code"]
+    reasons = []
+    for item in body.get("invalid_fields") or []:
+        if not isinstance(item, dict):
+            continue
+        code = str(item.get("code") or "invalid")
+        reasons.append(codes.get(code, codes["other"]).format(
+            label=label, code=code, max_length=item.get("max_length", "?")))
+    return "\n".join(reasons) or codes["other"].format(label=label, code="invalid")
+
+
+def is_reused(body: dict) -> bool:
+    """A 422 `request_id_reused`: the same request_id came with a different request."""
+    return body.get("status") == "invalid" and any(
+        isinstance(i, dict) and i.get("code") == "request_id_reused" for i in body.get("invalid_fields") or [])
 
 
 # --- one turn ------------------------------------------------------------------
 
 def _answer(state: ApartmentEditState, outcome: str, prompt: str, *, intro: str = "", items=None,
             choices=None, multi: bool = False, clear=None, logout: bool = False,
-            done: bool = False) -> dict:
+            done: bool = False, web: Optional[dict] = None) -> dict:
     """`reply` is the whole text (a numbered list included, for any text channel); `prompt` is the
     same without the list, for the page, which shows `choices` as buttons instead."""
     lines = items or []
     head = (intro + "\n\n" if intro else "") + prompt
-    return {
+    answer = {
         "intent": "edit_apartment",
         "outcome": outcome,
         "reply": "\n".join([head, *lines]),
@@ -392,6 +457,9 @@ def _answer(state: ApartmentEditState, outcome: str, prompt: str, *, intro: str 
         "logout": logout,
         "show_menu": done,
     }
+    if web:
+        answer["link"] = web
+    return answer
 
 
 def start(language: str) -> dict:
@@ -407,18 +475,18 @@ def handle_turn(token: str, message: str, state: ApartmentEditState) -> dict:
 
     if state.step == "blocked":
         if is_explicit_yes(text):
-            return _check_blocked(token, state)
+            return _send(token, state)
         if is_explicit_no(text):
             return _answer(ApartmentEditState(language=lang), "stopped", say(lang, "stopped_blocked"), done=True)
         return _answer(state, "blocked", say(lang, "blocked_wait"))
 
     if state.step == "confirm":
         if is_explicit_yes(text):
-            return _update(token, state)
+            return _send(token, state)
         if is_explicit_no(text):
             pending = state.pending
             return _reload(token, state, say(lang, "kept", label=pending.label, old=pending.old_text))
-        return _answer(state, "confirm", say(lang, "confirm_wait"), choices=_yes_no_buttons(lang))
+        return _answer(state, "confirm", say(lang, "confirm_wait"), choices=yes_no_buttons(lang))
 
     if state.step == "address":
         if is_explicit_no(text):
@@ -426,7 +494,7 @@ def handle_turn(token: str, message: str, state: ApartmentEditState) -> dict:
         return _search(token, state, text)
 
     if state.step == "choose_apartment":
-        index = _pick_index(text, len(state.candidates))
+        index = pick_index(text, len(state.candidates))
         if index is None:
             if is_explicit_no(text):
                 return _cancel(state)
@@ -440,7 +508,7 @@ def handle_turn(token: str, message: str, state: ApartmentEditState) -> dict:
     if state.step == "choose_field":
         if state.shown != _fields_fingerprint(apt):
             return _ask_field(state, apt, intro=say(lang, "list_changed") + "\n" + apartment_text(lang, apt))
-        field = _pick_field(lang, text, apt.fields)
+        field = pick_field(text, apt.fields)
         if field is None:
             if is_explicit_no(text):
                 return _cancel(state)
@@ -451,7 +519,7 @@ def handle_turn(token: str, message: str, state: ApartmentEditState) -> dict:
     field = next((f for f in apt.fields if f.field_key == state.field_key), None)
     if field is None or state.shown != _field_fingerprint(apt, field):
         return _ask_field(state, apt, intro=say(lang, "list_changed") + "\n" + apartment_text(lang, apt))
-    understood, value, problem = _pick_value(lang, text, field)
+    understood, value, problem = pick_value(text, field, field.kind in CLEARABLE)
     if not understood:
         if is_explicit_no(text):
             return _cancel(state)
@@ -464,14 +532,14 @@ def _cancel(state: ApartmentEditState) -> dict:
     return _answer(ApartmentEditState(language=lang), "cancelled", say(lang, "cancelled"), done=True)
 
 
-def _yes_no_buttons(lang: str) -> list[dict]:
+def yes_no_buttons(lang: str) -> list[dict]:
     return [{"label": MESSAGES[lang]["yes"], "message": "yes" if lang == "en" else "כן"},
             {"label": MESSAGES[lang]["no"], "message": "no" if lang == "en" else "לא"}]
 
 
 # --- picking -------------------------------------------------------------------
 
-def _pick_index(text: str, count: int) -> Optional[int]:
+def pick_index(text: str, count: int) -> Optional[int]:
     if text.isdigit() and 1 <= int(text) <= count:
         return int(text) - 1
     return None
@@ -482,35 +550,36 @@ def _matches(text: str, *labels) -> bool:
     return any(label is not None and _normalized(str(label)) == wanted for label in labels)
 
 
-def _pick_field(lang: str, text: str, fields: list[EditableField]) -> Optional[EditableField]:
-    index = _pick_index(text, len(fields))
+def pick_field(text: str, fields: list[EditableField]) -> Optional[EditableField]:
+    index = pick_index(text, len(fields))
     if index is not None:
         return fields[index]
-    return next((f for f in fields if _matches(text, f.label, f.label_en)), None)
+    return next((f for f in fields if _matches(text, f.label)), None)
 
 
 def _pick_option(token: str, options: list[Option]):
     """An option's value (as the CRM gave it, str or int), or None."""
-    index = _pick_index(token, len(options))
+    index = pick_index(token, len(options))
     if index is not None:
         return options[index].value
     for option in options:
-        if _matches(token, option.value, option.label, option.label_en):
+        if _matches(token, option.value, option.label):
             return option.value
     return None
 
 
-def _pick_value(lang: str, text: str, field: EditableField) -> tuple[bool, Value, str]:
-    """(understood, value to send, message key if not understood). None is a real value: it clears."""
+def pick_value(text: str, field: EditableField, clearable: bool) -> tuple[bool, Value, str]:
+    """(understood, value to send, message key if not understood). None is a real value: it clears.
+    `clearable`: whether the CRM lets this field be emptied (the caller knows its own rules)."""
     kind = field.kind
     clear = text == CLEAR_MESSAGE
-    if clear and kind in CLEARABLE:
+    if clear:
+        if not clearable:
+            return False, None, "cannot_clear"
         return True, ([] if kind == "multi_option" else None), ""
     if kind == "single_option":
         value = _pick_option(text, field.options)
-        if value is None:
-            return False, None, "cannot_clear" if clear else "pick_number"
-        return True, value, ""
+        return (False, None, "pick_number") if value is None else (True, value, "")
     if kind == "multi_option":
         parts = [p.strip() for p in re.split(r"[,،]", text) if p.strip()]
         tokens = []
@@ -535,14 +604,39 @@ def _pick_value(lang: str, text: str, field: EditableField) -> tuple[bool, Value
     if not text:
         return False, None, "not_understood_value"
     if kind == "date":
-        day_first = DAY_FIRST_DATE.fullmatch(text)
-        if day_first:
-            day, month, year = map(int, day_first.groups())
-            try:
-                return True, datetime.date(year, month, day).isoformat(), ""
-            except ValueError:
-                return False, None, "bad_date"
+        return typed_date(text)
     return True, text, ""
+
+
+def typed_date(text: str) -> tuple[bool, Value, str]:
+    """A day-first date as YYYY-MM-DD; an impossible one asked again; anything else as typed."""
+    day_first = DAY_FIRST_DATE.fullmatch(text)
+    if day_first:
+        day, month, year = map(int, day_first.groups())
+        try:
+            return True, datetime.date(year, month, day).isoformat(), ""
+        except ValueError:
+            return False, None, "bad_date"
+    return True, text, ""
+
+
+def value_question(lang: str, field: EditableField, current: str, clearable: bool) -> tuple[str, list, Optional[list],
+                                                                                            Optional[dict]]:
+    """(question, numbered items, buttons or None for the default ones, the clear button or None)."""
+    kind = field.kind
+    key = {"single_option": "choose_single", "multi_option": "choose_multi", "yes_no": "choose_yes_no",
+           "text": "type_text", "number": "type_number", "date": "type_date"}[kind]
+    question = say(lang, key, label=field_label(field), current=current)
+    items, choices = [], None
+    if kind in ("single_option", "multi_option"):
+        items = numbered([option_label(o) for o in field.options])
+    elif kind == "yes_no":
+        items = numbered([MESSAGES[lang]["yes"], MESSAGES[lang]["no"]])
+    clear = {"label": MESSAGES[lang]["clear"], "message": CLEAR_MESSAGE} if clearable else None
+    if clear and kind != "multi_option":
+        choices = [{"label": line, "message": str(i)} for i, line in enumerate(items, 1)]
+        choices.append(clear)
+    return question, items, choices, clear
 
 
 # --- asking --------------------------------------------------------------------
@@ -550,7 +644,7 @@ def _pick_value(lang: str, text: str, field: EditableField) -> tuple[bool, Value
 def _ask_apartment(state: ApartmentEditState, prefix: str = "") -> dict:
     lang = state.language
     prompt = (prefix + "\n" if prefix else "") + say(lang, "choose_apartment")
-    items = _numbered([c.text for c in state.candidates])
+    items = numbered([c.text for c in state.candidates])
     if state.truncated:
         items.append(say(lang, "truncated", count=len(state.candidates)))
     choices = [{"label": line, "message": str(i)} for i, line in enumerate(items[:len(state.candidates)], 1)]
@@ -565,14 +659,16 @@ def _ask_field(state: ApartmentEditState, apt: Apartment, prefix: str = "", intr
     state.field_key = None
     state.pending = None
     state.candidates = []
+    web = link(lang, apt.web_path)
     if not apt.fields:
         key = "no_fields_left" if after_change else "no_fields"
         shown = intro or apartment_text(lang, apt)
-        return _answer(ApartmentEditState(language=lang), "no_fields", say(lang, key), intro=shown, done=True)
+        return _answer(ApartmentEditState(language=lang), "no_fields", say(lang, key), intro=shown, done=True,
+                       web=web)
     state.shown = _fields_fingerprint(apt)
     prompt = (prefix + "\n" if prefix else "") + say(lang, "choose_field")
-    return _answer(state, "choose_field", prompt, intro=intro,
-                   items=_numbered([field_label(lang, f) for f in apt.fields]))
+    return _answer(state, "choose_field", prompt, intro=intro, items=numbered([field_label(f) for f in apt.fields]),
+                   web=web)
 
 
 def _ask_value(state: ApartmentEditState, apt: Apartment, field: EditableField, prefix: str = "",
@@ -583,34 +679,23 @@ def _ask_value(state: ApartmentEditState, apt: Apartment, field: EditableField, 
     state.field_key = field.field_key
     state.pending = None
     state.shown = _field_fingerprint(apt, field)
-    kind = field.kind
-    key = {"single_option": "choose_single", "multi_option": "choose_multi", "yes_no": "choose_yes_no",
-           "text": "type_text", "number": "type_number", "date": "type_date"}[kind]
-    prompt = (prefix + "\n" if prefix else "") + say(
-        lang, key, label=field_label(lang, field), current=value_text(lang, field, field.current_value))
-    items, choices = [], None
-    if kind in ("single_option", "multi_option"):
-        items = _numbered([option_label(lang, o) for o in field.options])
-    elif kind == "yes_no":
-        items = _numbered([MESSAGES[lang]["yes"], MESSAGES[lang]["no"]])
-    clear = {"label": MESSAGES[lang]["clear"], "message": CLEAR_MESSAGE} if kind in CLEARABLE else None
-    if clear and kind != "multi_option":
-        choices = [{"label": line, "message": str(i)} for i, line in enumerate(items, 1)]
-        choices.append(clear)
+    question, items, choices, clear = value_question(
+        lang, field, value_text(lang, field, field.current_value), field.kind in CLEARABLE)
+    prompt = (prefix + "\n" if prefix else "") + question
     return _answer(state, "choose_value", prompt, intro=intro, items=items, choices=choices,
-                   multi=kind == "multi_option", clear=clear)
+                   multi=field.kind == "multi_option", clear=clear)
 
 
 def _confirm_screen(state: ApartmentEditState, apt: Apartment, field: EditableField, value) -> dict:
     lang = state.language
-    label = field_label(lang, field)
+    label = field_label(field)
     state.step = "confirm"
     state.pending = PendingChange(field_key=field.field_key, value=value, label=label,
                                   old_text=value_text(lang, field, field.current_value),
                                   new_text=value_text(lang, field, value))
-    reply = say(lang, "confirm", label=label, id=apt.apartment_id, old=state.pending.old_text,
+    reply = say(lang, "confirm", label=label, place=place(lang, apt), old=state.pending.old_text,
                 new=state.pending.new_text)
-    return _answer(state, "confirm", reply, choices=_yes_no_buttons(lang))
+    return _answer(state, "confirm", reply, choices=yes_no_buttons(lang))
 
 
 # --- CRM steps -----------------------------------------------------------------
@@ -631,8 +716,7 @@ def _search(token: str, state: ApartmentEditState, query: str) -> dict:
     state.truncated = result.body.get("truncated", False)
     state.candidates = [
         Candidate(apartment_id=a.apartment_id, lineage_id=a.lineage_id,
-                  text=full_address(lang, a) + (say(lang, "resident", name=a.resident_name) if a.resident_name else "")
-                  + f" (#{a.apartment_id})")
+                  text=full_address(lang, a) + (say(lang, "resident", name=a.resident_name) if a.resident_name else ""))
         for a in results
     ]
     return _ask_apartment(state)
@@ -695,22 +779,34 @@ def _reload(token: str, state: ApartmentEditState, message: str, ask_value_for: 
     return _ask_field(state, apt, intro=intro, after_change=True)
 
 
-def _update(token: str, state: ApartmentEditState) -> dict:
+def _send(token: str, state: ApartmentEditState) -> dict:
+    """The update for an explicit yes: the first send of a confirmed change, a resend after
+    "not sent", or the check after a lost answer. Each carries the change's one request_id
+    and its one body, so the CRM can never apply it twice."""
     lang = state.language
     pending = state.pending
-    result = crm_api.update_apartment_field(token, state.apartment_id, pending.field_key, pending.value)
+    checking = state.step == "blocked"
+    if pending.request_id is None:
+        pending.request_id = new_request_id()
+        pending.apartment_id = state.apartment_id
+    result = crm_api.update_apartment_field(token, pending.apartment_id, pending.field_key, pending.value,
+                                            pending.request_id)
     body = result.body
     status = body.get("status")
 
     if status in ("updated", "unchanged"):
         apt = Apartment(**body["apartment"])  # what the CRM saved and read back
         field = next((f for f in apt.fields if f.field_key == pending.field_key), None)
+        label = field_label(field) if field else pending.label
         if status == "updated" and (body.get("value") is None and field is None):
             line = say(lang, "saved_hidden", label=pending.label)
         else:
             shown = value_text(lang, field, body.get("value"))
-            line = say(lang, "saved" if status == "updated" else "unchanged",
-                       label=field_label(lang, field) if field else pending.label, value=shown)
+            if checking:
+                line = say(lang, "confirmed" if status == "updated" else "confirmed_unchanged",
+                           label=label, value=shown)
+            else:
+                line = say(lang, "saved" if status == "updated" else "unchanged", label=label, value=shown)
         answer = _ask_field(state, apt, prefix=say(lang, "next"), intro=line + "\n" + apartment_text(lang, apt),
                             after_change=True)
         if answer["outcome"] == "choose_field":
@@ -722,61 +818,20 @@ def _update(token: str, state: ApartmentEditState) -> dict:
         return _reload(token, state, say(lang, "not_found_reread"), ask_value_for=pending.field_key)
     if status == "uncertain":
         state.step = "blocked"
-        return _answer(state, "uncertain", say(lang, "uncertain"))
-    if status == "crm_unreachable":  # no connection: the update was never sent
-        return _answer(state, "not_sent", say(lang, "not_sent"), choices=_yes_no_buttons(lang))
+        return _answer(state, "uncertain", say(lang, "still_unknown" if checking else "uncertain"))
+    if status == "crm_unreachable":  # no connection: this send never left
+        if checking:
+            return _answer(state, "blocked", say(lang, "still_unknown"))
+        return _answer(state, "not_sent", say(lang, "not_sent"), choices=yes_no_buttons(lang))
     if status == "invalid":
-        codes = MESSAGES[lang]["code"]
-        reasons = []
-        for item in body.get("invalid_fields") or []:
-            if not isinstance(item, dict):
-                continue
-            code = str(item.get("code") or "invalid")
-            reasons.append(codes.get(code, codes["other"]).format(label=pending.label, code=code))
-        reply = say(lang, "invalid", reason="\n".join(reasons) or codes["other"].format(
-            label=pending.label, code="invalid"))
+        if is_reused(body):
+            return _reload(token, state, say(lang, "reused"))
+        reply = say(lang, "invalid", reason=invalid_reasons(lang, body, pending.label))
         return _reload(token, state, reply, ask_value_for=pending.field_key)
     if status == "forbidden":
         # The CRM gives one refusal for every reason (hidden, locked, unknown, not assigned): never explained here.
         return _reload(token, state, say(lang, "forbidden", label=pending.label))
     return _failure(state, body)
-
-
-def same_value(kind: str, current, sent) -> bool:
-    """Whether the CRM's current value is the value that was sent (after a lost answer)."""
-    if _is_empty(current) and _is_empty(sent):
-        return True
-    if kind == "multi_option":
-        return sorted(map(str, current or [])) == sorted(map(str, sent or []))
-    if kind == "yes_no":
-        return current is sent
-    if kind == "number":
-        try:
-            return float(current) == float(sent)
-        except (TypeError, ValueError):
-            return False
-    if kind == "date":
-        return str(current)[:10] == str(sent).strip()[:10]
-    return str(current).strip() == str(sent).strip()
-
-
-def _check_blocked(token: str, state: ApartmentEditState) -> dict:
-    lang = state.language
-    pending = state.pending
-    apt, failure = _reread(token, state)
-    if failure:
-        return failure  # a gone apartment ends; any other failure keeps step "blocked"
-    field = next((f for f in apt.fields if f.field_key == pending.field_key), None)
-    if field is None:
-        return _answer(state, "not_confirmed", say(lang, "not_visible", label=pending.label,
-                                                    wanted=pending.new_text))
-    if same_value(field.kind, field.current_value, pending.value):
-        line = say(lang, "confirmed", label=field_label(lang, field),
-                   value=value_text(lang, field, field.current_value))
-        return _ask_field(state, apt, intro=line + "\n" + apartment_text(lang, apt), after_change=True)
-    return _answer(state, "not_confirmed", say(
-        lang, "not_confirmed", label=field_label(lang, field), current=value_text(lang, field, field.current_value),
-        wanted=pending.new_text))
 
 
 def _failure(state: ApartmentEditState, body: dict) -> dict:

@@ -8,6 +8,7 @@ own `editable_fields`, decided by the CRM per user and apartment.
 """
 
 import json
+import re
 from pathlib import Path
 
 import httpx
@@ -20,35 +21,42 @@ TOKEN = "eyJhbGciOiJIUzI1NiJ9.user-a-secret.sig"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 ROOT = Path(__file__).resolve().parent.parent
 
-# Field entries as the CRM's apartment_views builds them.
-STATUS = {"field_key": "apartment.Jewish_status", "label": "סטטוס יהודי", "label_en": "Jewish status",
+# Field entries as the CRM's apartment_views builds them (fixes118): ONE label, already in the
+# user's CRM language - English here; the Hebrew test builds its own.
+STATUS = {"field_key": "apartment.Jewish_status", "label": "Jewish status",
           "kind": "single_option", "current_value": "not_known",
-          "options": [{"value": "jewish", "label": "יהודי", "label_en": "Jewish"},
-                      {"value": "not_jewish", "label": "לא יהודי", "label_en": "Not Jewish"},
-                      {"value": "not_known", "label": "לא ידוע", "label_en": "Unknown"}]}
-LANGUAGES = {"field_key": "apartment.language", "label": "שפה", "label_en": "Language",
+          "options": [{"value": "jewish", "label": "Jewish"},
+                      {"value": "not_jewish", "label": "Not Jewish"},
+                      {"value": "not_known", "label": "Unknown"}]}
+LANGUAGES = {"field_key": "apartment.language", "label": "Language",
              "kind": "multi_option", "current_value": [],
-             "options": [{"value": "hebrew", "label": "עברית", "label_en": "Hebrew"},
-                         {"value": "russian", "label": "רוסית", "label_en": "Russian"},
-                         {"value": "english", "label": "אנגלית", "label_en": "English"}]}
-PHONE = {"field_key": "apartments.phone", "label": "טלפון", "label_en": "Phone", "kind": "text",
-         "current_value": "0521234567"}
-SIZE = {"field_key": "customfield.apartment.family_size", "label": "גודל משפחה", "label_en": "Family size",
+             "options": [{"value": "hebrew", "label": "Hebrew"},
+                         {"value": "russian", "label": "Russian"},
+                         {"value": "english", "label": "English"}]}
+PHONE = {"field_key": "apartments.phone", "label": "Phone", "kind": "text", "current_value": "0521234567"}
+SIZE = {"field_key": "customfield.apartment.family_size", "label": "Family size",
         "kind": "number", "current_value": 4.0}
-VISIT = {"field_key": "customfield.apartment.last_visit", "label": "ביקור אחרון", "label_en": "Last visit",
+VISIT = {"field_key": "customfield.apartment.last_visit", "label": "Last visit",
          "kind": "date", "current_value": "2026-01-15"}
-MEZUZAH = {"field_key": "customfield.apartment.has_mezuzah", "label": "יש מזוזה", "label_en": "Has mezuzah",
-           "kind": "yes_no", "current_value": None}
-REPORT = {"field_key": "apartments.report_number_id", "label": "מספר דוח", "label_en": "Report number",
+MEZUZAH = {"field_key": "customfield.apartment.has_mezuzah", "label": "Has mezuzah",
+           "kind": "yes_no", "current_value": False}
+REPORT = {"field_key": "apartments.report_number_id", "label": "Report number",
           "kind": "single_option", "current_value": 3,
-          "options": [{"value": n, "label": f"R-{n:02d}", "label_en": f"R-{n:02d}"} for n in range(1, 26)]}
+          "options": [{"value": n, "label": f"R-{n:02d}"} for n in range(1, 26)]}
 ADMIN_FIELDS = [STATUS, LANGUAGES, PHONE, SIZE, VISIT, MEZUZAH, REPORT]
 ACTIVIST_FIELDS = [STATUS, PHONE]
+HE_STATUS = {"field_key": "apartment.Jewish_status", "label": "סטטוס יהודי",
+             "kind": "single_option", "current_value": "not_known",
+             "options": [{"value": "jewish", "label": "יהודי"},
+                         {"value": "not_jewish", "label": "לא יהודי"},
+                         {"value": "not_known", "label": "לא ידוע"}]}
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
 
 def apt(apartment_id=11, lineage_id=11, fields=None, **values):
     return {"apartment_id": apartment_id, "lineage_id": lineage_id, "building_address": "Herzl 10, Tel Aviv",
             "apartment_name": "3", "floor": "1", "resident_name": "Cohen",
+            "web_path": f"/dashboard/apartments/lineage/{lineage_id}",
             "editable_fields": [dict(f) for f in (ADMIN_FIELDS if fields is None else fields)], **values}
 
 
@@ -67,14 +75,21 @@ def search(*apartments, truncated=False):
     return ok({"results": list(apartments), "truncated": truncated})
 
 
-def answer(apartment, field_key, status="updated", previous=11, value="missing"):
+def answer(apartment, field_key, status="updated", previous=11, value="missing", replayed=False):
     """The CRM's update answer; `value` defaults to the field's current value in `apartment`."""
     if value == "missing":
         value = next((f["current_value"] for f in apartment["editable_fields"] if f["field_key"] == field_key), None)
-    return ok({"status": status, "field_key": field_key, "value": value,
+    return ok({"status": status, "replayed": replayed, "field_key": field_key, "value": value,
                "apartment_id": apartment["apartment_id"],
                "previous_apartment_id": previous if status == "updated" else None,
                "lineage_id": apartment["lineage_id"], "apartment": apartment})
+
+
+def sent(post):
+    """An update's body without its request_id (checked to be a fresh uuid4 string)."""
+    body = json.loads(post.content)
+    assert UUID.match(body.pop("request_id"))
+    return body
 
 
 def invalid(field_key, code):
@@ -139,9 +154,10 @@ def test_one_match_shows_the_apartment_and_the_crms_own_field_list(client, fake_
     assert request.method == "GET" and request.url.path == "/api/assistant/apartments/search"
     assert request.url.params["q"] == "Herzl 10"
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
-    assert "Apartment #11: Herzl 10, Tel Aviv, apartment 3, floor 1 - Cohen" in data["reply"]
+    assert data["reply"].startswith("Herzl 10, Tel Aviv, apartment 3, floor 1 - Cohen\n")
+    assert "#11" not in data["reply"]  # never the internal apartment id (fixes118)
     for line in ("- Jewish status: Unknown", "- Language: -", "- Phone: 0521234567", "- Family size: 4",
-                 "- Last visit: 2026-01-15", "- Has mezuzah: -", "- Report number: R-03"):
+                 "- Last visit: 2026-01-15", "- Has mezuzah: No", "- Report number: R-03"):
         assert line in data["reply"]
     labels = ["Jewish status", "Language", "Phone", "Family size", "Last visit", "Has mezuzah", "Report number"]
     assert "\n".join(f"{i}. {label}" for i, label in enumerate(labels, 1)) in data["reply"]
@@ -163,7 +179,7 @@ def test_many_matches_are_numbered_with_the_truncated_note_and_picked_by_number(
     fake_crm.answers.append(search(apt(), second, truncated=True))
     data = turn(client, "Herzl")
     assert data["outcome"] == "choose_apartment"
-    assert "2. Herzl 10, Tel Aviv, apartment 4, floor 1 - Levi (#12)" in data["reply"]
+    assert "2. Herzl 10, Tel Aviv, apartment 4, floor 1 - Levi" in data["reply"] and "#12" not in data["reply"]
     assert "Only the first 2 are shown" in data["reply"]
     assert len(data["choices"]) == 2
     for wrong in ("9", "0", "abc"):  # not on the list: asked again, no CRM call
@@ -173,7 +189,8 @@ def test_many_matches_are_numbered_with_the_truncated_note_and_picked_by_number(
     picked = turn(client, "2", data["state"])
     assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/getapartment"
     assert fake_crm.requests[-1].url.params["id"] == "12"
-    assert "Apartment #12" in picked["reply"] and picked["state"]["apartment_id"] == 12
+    assert picked["reply"].startswith("Herzl 10, Tel Aviv, apartment 4, floor 1 - Levi")
+    assert picked["state"]["apartment_id"] == 12
 
 
 def test_an_activist_gets_exactly_the_fewer_fields_the_crm_returns(client, fake_crm):
@@ -211,16 +228,18 @@ def test_single_option_confirm_then_send_then_show_what_the_crm_returned(client,
     fake_crm.answers.append(ok(apt()))
     confirm = turn(client, "2", value["state"])
     assert posts(fake_crm) == []  # nothing is sent before the yes
-    assert "Change Jewish status of apartment #11:\nfrom: Unknown\nto: Not Jewish" in confirm["reply"]
+    # fixes118 decision 8: "address, apartment <name>", never the internal id.
+    assert "Change Jewish status of Herzl 10, Tel Aviv, apartment 3:\nfrom: Unknown\nto: Not Jewish" in confirm["reply"]
+    assert "#11" not in confirm["reply"]
     assert [c["message"] for c in confirm["choices"]] == ["yes", "no"]
     # The CRM answers with ITS state - here deliberately not what was sent.
     fake_crm.answers.append(answer(with_value(apt(21, 11), STATUS["field_key"], "jewish"), STATUS["field_key"]))
     saved = turn(client, "yes", confirm["state"])
     (post,) = posts(fake_crm)
     assert post.url.path == "/api/assistant/apartments/11/update"
-    assert json.loads(post.content) == {"field_key": "apartment.Jewish_status", "value": "not_jewish"}
+    assert sent(post) == {"field_key": "apartment.Jewish_status", "value": "not_jewish"}
     assert saved["outcome"] == "updated"
-    assert saved["reply"].startswith("Saved. The CRM now shows Jewish status: Jewish.\nApartment #21:")
+    assert saved["reply"].startswith("Saved. The CRM now shows Jewish status: Jewish.\nHerzl 10, Tel Aviv, apartment 3")
     assert "Not Jewish" not in saved["reply"].split("Choose another")[0]
     # The next edit uses the NEW id (an edit changes the apartment's id); lineage stays.
     assert saved["state"]["apartment_id"] == 21 and saved["state"]["lineage_id"] == 11
@@ -232,6 +251,9 @@ def test_single_option_confirm_then_send_then_show_what_the_crm_returned(client,
                                    previous=21))
     turn(client, "yes", confirm["state"])
     assert posts(fake_crm)[-1].url.path == "/api/assistant/apartments/21/update"
+    # Every confirmed change gets its own request_id.
+    first, second = (json.loads(p.content)["request_id"] for p in posts(fake_crm))
+    assert first != second
 
 
 def test_multi_option_takes_several_numbers_or_none(client, fake_crm):
@@ -243,8 +265,7 @@ def test_multi_option_takes_several_numbers_or_none(client, fake_crm):
     fake_crm.answers.append(answer(with_value(apt(21, 11), LANGUAGES["field_key"], ["hebrew", "english"]),
                                    LANGUAGES["field_key"]))
     saved = turn(client, "yes", confirm["state"])
-    assert json.loads(posts(fake_crm)[-1].content) == {"field_key": "apartment.language",
-                                                        "value": ["hebrew", "english"]}
+    assert sent(posts(fake_crm)[-1]) == {"field_key": "apartment.language", "value": ["hebrew", "english"]}
     assert "Language: Hebrew, English" in saved["reply"]
     fake_crm.answers += [ok(apt(21, 11)), ok(apt(21, 11))]
     value = turn(client, "2", saved["state"])
@@ -252,10 +273,10 @@ def test_multi_option_takes_several_numbers_or_none(client, fake_crm):
     confirm = turn(client, value["clear"]["message"], value["state"])
     fake_crm.answers.append(answer(apt(22, 11), LANGUAGES["field_key"], previous=21))
     turn(client, "yes", confirm["state"])
-    assert json.loads(posts(fake_crm)[-1].content)["value"] == []
+    assert sent(posts(fake_crm)[-1])["value"] == []
 
 
-@pytest.mark.parametrize("field, typed, sent, shown", [
+@pytest.mark.parametrize("field, typed, sent_value, shown", [
     (PHONE, "052-765 4321", "052-765 4321", "052-765 4321"),
     (PHONE, "[clear]", None, "-"),
     (PHONE, "none", "none", "none"),  # a typed word never clears: only the button does
@@ -269,16 +290,17 @@ def test_multi_option_takes_several_numbers_or_none(client, fake_crm):
     (VISIT, "next week", "next week", "next week"),  # not a date form: the CRM checks it
     (VISIT, "[clear]", None, "-"),
 ])
-def test_typed_kinds_are_sent_as_typed_and_only_the_button_clears(client, fake_crm, field, typed, sent, shown):
+def test_typed_kinds_are_sent_as_typed_and_only_the_button_clears(client, fake_crm, field, typed, sent_value,
+                                                                   shown):
     value = at_value(client, fake_crm, field)
     assert value["outcome"] == "choose_value"
     assert value["choices"][-1] == value["clear"] == {"label": "Clear the value", "message": "[clear]"}
     fake_crm.answers.append(ok(apt()))
     confirm = turn(client, typed, value["state"])
     assert f"to: {shown}" in confirm["reply"]
-    fake_crm.answers.append(answer(apt(21, 11), field["field_key"], value=sent))
+    fake_crm.answers.append(answer(apt(21, 11), field["field_key"], value=sent_value))
     turn(client, "yes", confirm["state"])
-    assert json.loads(posts(fake_crm)[-1].content) == {"field_key": field["field_key"], "value": sent}
+    assert sent(posts(fake_crm)[-1]) == {"field_key": field["field_key"], "value": sent_value}
 
 
 def test_date_question_names_the_format(client, fake_crm):
@@ -296,22 +318,26 @@ def test_an_impossible_day_first_date_is_asked_again_without_an_update(client, f
     assert posts(fake_crm) == []
 
 
-@pytest.mark.parametrize("typed, sent", [("1", True), ("yes", True), ("2", False), ("no", False),
-                                          ("כן", True), ("לא", False), ("[clear]", None)])
-def test_yes_no_field_sends_a_boolean_and_no_is_a_value_not_a_cancel(client, fake_crm, typed, sent):
+@pytest.mark.parametrize("typed, sent_value", [("1", True), ("yes", True), ("2", False), ("no", False),
+                                                ("כן", True), ("לא", False)])
+def test_yes_no_field_sends_a_boolean_and_no_is_a_value_not_a_cancel(client, fake_crm, typed, sent_value):
     value = at_value(client, fake_crm, MEZUZAH)
     assert "1. Yes\n2. No" in value["reply"]
     fake_crm.answers.append(ok(apt()))
     confirm = turn(client, typed, value["state"])
     assert confirm["outcome"] == "confirm"
-    fake_crm.answers.append(answer(apt(21, 11), MEZUZAH["field_key"], value=sent))
+    fake_crm.answers.append(answer(apt(21, 11), MEZUZAH["field_key"], value=sent_value))
     turn(client, "yes" if confirm["state"]["language"] == "en" else "כן", confirm["state"])
-    assert json.loads(posts(fake_crm)[-1].content) == {"field_key": MEZUZAH["field_key"], "value": sent}
+    assert sent(posts(fake_crm)[-1]) == {"field_key": MEZUZAH["field_key"], "value": sent_value}
 
 
-def test_a_single_option_can_not_be_cleared(client, fake_crm):
-    value = at_value(client, fake_crm)
+@pytest.mark.parametrize("field", [STATUS, MEZUZAH])
+def test_a_single_option_or_yes_no_is_never_cleared(client, fake_crm, field):
+    """The CRM refuses null for both (yes_no: 422 expected_yes_no), so no clear button is offered,
+    and a clear message that still arrives is asked again, never sent."""
+    value = at_value(client, fake_crm, field)
     assert value["clear"] is None and all(c["message"] != "[clear]" for c in value["choices"])
+    assert "Clear" not in json.dumps(value["choices"])
     fake_crm.answers.append(ok(apt()))
     again = turn(client, "[clear]", value["state"])
     assert "can't be left empty" in again["reply"] and again["state"]["step"] == "choose_value"
@@ -327,7 +353,7 @@ def test_a_long_option_list_is_numbered_and_numeric_values_are_sent_as_numbers(c
     assert "from: R-03\nto: R-23" in confirm["reply"]
     fake_crm.answers.append(answer(with_value(apt(21, 11), REPORT["field_key"], 23), REPORT["field_key"]))
     saved = turn(client, "yes", confirm["state"])
-    assert json.loads(posts(fake_crm)[-1].content) == {"field_key": "apartments.report_number_id", "value": 23}
+    assert sent(posts(fake_crm)[-1]) == {"field_key": "apartments.report_number_id", "value": 23}
     assert "Report number: R-23" in saved["reply"]
 
 
@@ -397,7 +423,7 @@ def test_409_rereads_by_lineage_and_never_resends(client, fake_crm):
     assert fake_crm.requests[-1].method == "GET"
     assert fake_crm.requests[-1].url.path == "/api/assistant/apartments/getapartment"
     assert fake_crm.requests[-1].url.params["id"] == "11"
-    assert "changed by someone else" in again["reply"] and "Apartment #30" in again["reply"]
+    assert "changed by someone else" in again["reply"] and "#30" not in again["reply"]
     assert "- Jewish status: Jewish" in again["reply"]
     assert again["state"]["step"] == "choose_value" and again["state"]["apartment_id"] == 30
 
@@ -422,37 +448,85 @@ def test_404_with_a_live_lineage_shows_it_and_asks_again(client, fake_crm):
     httpx.ReadTimeout("slow"), httpx.RemoteProtocolError("dropped"),
     httpx.Response(502, text="bad gateway"), httpx.Response(200, text="not json"),
 ])
-def test_a_lost_answer_blocks_the_edit_and_yes_only_rereads(client, fake_crm, lost):
+def test_a_lost_answer_blocks_and_yes_resends_the_same_request_id_with_the_same_body(client, fake_crm, lost):
     confirm = at_confirm(client, fake_crm)
     fake_crm.answers.append(lost)
     blocked = turn(client, "yes", confirm["state"])
     assert blocked["outcome"] == "uncertain" and blocked["awaiting_check"] is True
-    assert "won't send it again" in blocked["reply"]
+    assert "don't know yet whether the change was saved" in blocked["reply"]
+    assert "Saved" not in blocked["reply"]
     # Anything but yes / no: still blocked, nothing sent.
     before = len(fake_crm.requests)
     wait = turn(client, "1", blocked["state"])
     assert wait["outcome"] == "blocked" and len(fake_crm.requests) == before
-    # yes -> a read; the CRM does not show the change.
-    fake_crm.answers.append(ok(apt()))
+    # yes -> the SAME request again (no read first); the CRM replays its record: the proof.
+    fake_crm.answers.append(answer(with_value(apt(40, 11), STATUS["field_key"], "not_jewish"), STATUS["field_key"],
+                                   replayed=True))
     check = turn(client, "yes", blocked["state"])
-    assert check["outcome"] == "not_confirmed" and check["state"]["step"] == "blocked"
-    assert "Jewish status: Unknown. Your change (Not Jewish) does not show" in check["reply"]
-    # yes again -> the CRM shows it now.
-    fake_crm.answers.append(ok(with_value(apt(40, 11), STATUS["field_key"], "not_jewish")))
-    check = turn(client, "yes", check["state"])
-    assert check["reply"].startswith("Checked: the CRM shows the change was saved (Jewish status: Not Jewish)")
+    first, second = posts(fake_crm)
+    assert len(fake_crm.requests) == before + 1 and fake_crm.requests[-1] is second
+    assert second.url.path == first.url.path == "/api/assistant/apartments/11/update"
+    assert json.loads(second.content) == json.loads(first.content)  # same request_id, same body
+    assert check["reply"].startswith("Checked: the CRM confirms the change was saved. "
+                                     "It now shows Jewish status: Not Jewish.")
     assert check["state"]["step"] == "choose_field" and check["state"]["apartment_id"] == 40
-    assert len(posts(fake_crm)) == 1  # the update was sent exactly once
+    assert check["state"]["pending"] is None  # settled: a next change gets a new request_id
 
 
-def test_a_lost_answer_for_a_field_no_longer_listed_stays_unknown(client, fake_crm):
+def test_a_matching_value_alone_is_never_called_saved(client, fake_crm):
+    """After a lost answer the chat never reads the apartment and calls a matching value saved:
+    the only proof is the CRM's answer to the same request_id."""
     confirm = at_confirm(client, fake_crm)
-    fake_crm.answers += [httpx.ReadTimeout("slow"), ok(apt(fields=[PHONE]))]
+    fake_crm.answers.append(httpx.ReadTimeout("slow"))
+    blocked = turn(client, "yes", confirm["state"])
+    # The resend is lost too: still blocked, still unknown - even though nothing contradicts a save.
+    fake_crm.answers.append(httpx.ReadTimeout("slow again"))
+    still = turn(client, "yes", blocked["state"])
+    assert still["state"]["step"] == "blocked" and "Still no answer" in still["reply"]
+    # No connection at all this time: still blocked (unlike a first send, nothing is "not sent").
+    fake_crm.answers.append(httpx.ConnectError("refused"))
+    still = turn(client, "yes", still["state"])
+    assert still["state"]["step"] == "blocked" and "Still no answer" in still["reply"]
+    assert all(r.method == "POST" for r in fake_crm.requests[-3:])
+    assert len({json.loads(p.content)["request_id"] for p in posts(fake_crm)}) == 1
+
+
+def test_a_resend_that_finds_the_first_send_never_arrived_is_saved_now(client, fake_crm):
+    confirm = at_confirm(client, fake_crm)
+    fake_crm.answers += [httpx.ReadTimeout("slow"),
+                         answer(with_value(apt(41, 11), STATUS["field_key"], "not_jewish"), STATUS["field_key"])]
     blocked = turn(client, "yes", confirm["state"])
     check = turn(client, "yes", blocked["state"])
-    assert check["outcome"] == "not_confirmed" and check["state"]["step"] == "blocked"
-    assert "can't see whether your change (Not Jewish) was saved" in check["reply"]
-    assert len(posts(fake_crm)) == 1
+    assert check["outcome"] == "updated" and check["reply"].startswith("Checked: the CRM confirms the change was saved")
+
+
+def test_a_resend_answered_unchanged_says_nothing_needed_saving(client, fake_crm):
+    confirm = at_confirm(client, fake_crm, value="3")
+    fake_crm.answers += [httpx.ReadTimeout("slow"), answer(apt(), STATUS["field_key"], status="unchanged",
+                                                           replayed=True)]
+    blocked = turn(client, "yes", confirm["state"])
+    check = turn(client, "yes", blocked["state"])
+    assert check["outcome"] == "unchanged"
+    assert check["reply"].startswith("Checked: the CRM already had Jewish status: Unknown, so nothing needed saving.")
+
+
+def test_a_resend_refused_with_409_means_not_saved_and_asks_again(client, fake_crm):
+    confirm = at_confirm(client, fake_crm)
+    current = with_value(apt(30, 11), STATUS["field_key"], "jewish")
+    fake_crm.answers += [httpx.ReadTimeout("slow"), httpx.Response(409, json={"detail": "changed"}), ok(current)]
+    blocked = turn(client, "yes", confirm["state"])
+    again = turn(client, "yes", blocked["state"])
+    assert "changed by someone else" in again["reply"] and again["state"]["step"] == "choose_value"
+    assert again["state"]["pending"] is None and again["state"]["apartment_id"] == 30
+
+
+def test_request_id_reused_says_nothing_was_saved_and_starts_over(client, fake_crm):
+    confirm = at_confirm(client, fake_crm)
+    fake_crm.answers += [invalid("request_id", "request_id_reused"), ok(apt())]
+    done = turn(client, "yes", confirm["state"])
+    assert done["reply"].startswith("The CRM refused the request because its request id was already used")
+    assert "Nothing was saved" in done["reply"]
+    assert done["state"]["step"] == "choose_field" and done["state"]["pending"] is None
 
 
 def test_no_while_blocked_stops(client, fake_crm):
@@ -472,6 +546,8 @@ def test_crm_unreachable_means_not_sent_and_only_a_new_yes_sends_again(client, f
     fake_crm.answers.append(answer(with_value(apt(21, 11), STATUS["field_key"], "not_jewish"), STATUS["field_key"]))
     second = turn(client, "yes", first["state"])
     assert second["outcome"] == "updated" and len(posts(fake_crm)) == 2
+    # The first send never left; the second carries the same request_id and body.
+    assert json.loads(posts(fake_crm)[0].content) == json.loads(posts(fake_crm)[1].content)
 
 
 def test_crm_unreachable_on_search(client, fake_crm):
@@ -552,18 +628,18 @@ def test_an_option_field_without_options_is_not_trusted(client, fake_crm):
 # --- language, state, token, no local field lists ----------------------------------
 
 def test_hebrew_flow_uses_the_crms_hebrew_labels(client, fake_crm):
-    apartment = apt(building_address="הרצל 10")
+    apartment = apt(building_address="הרצל 10", fields=[HE_STATUS])
     fake_crm.answers += [search(apartment), ok(apartment)]
     data = turn(client, "הרצל 10", language="he")
-    assert "דירה #11: הרצל 10, דירה 3, קומה 1" in data["reply"] and "1. סטטוס יהודי" in data["reply"]
+    assert data["reply"].startswith("הרצל 10, דירה 3, קומה 1") and "1. סטטוס יהודי" in data["reply"]
     value = turn(client, "1", data["state"])
     assert "הערך הנוכחי: לא ידוע" in value["reply"] and "1. יהודי" in value["reply"]
     fake_crm.answers.append(ok(apartment))
     confirm = turn(client, "יהודי", value["state"])
-    assert "מ: לא ידוע\nל: יהודי" in confirm["reply"]
+    assert "שינוי סטטוס יהודי בהרצל 10, דירה 3:\nמ: לא ידוע\nל: יהודי" in confirm["reply"]
     assert [c["message"] for c in confirm["choices"]] == ["כן", "לא"]
-    fake_crm.answers.append(answer(with_value(apt(21, 11, building_address="הרצל 10"), STATUS["field_key"],
-                                              "jewish"), STATUS["field_key"]))
+    fake_crm.answers.append(answer(with_value(apt(21, 11, building_address="הרצל 10", fields=[HE_STATUS]),
+                                              STATUS["field_key"], "jewish"), STATUS["field_key"]))
     saved = turn(client, "כן", confirm["state"])
     assert saved["reply"].startswith("נשמר. ב-CRM מופיע עכשיו סטטוס יהודי: יהודי.")
 
@@ -587,55 +663,86 @@ def test_the_state_holds_no_field_list_and_no_token(client, fake_crm):
 
 def test_no_field_name_label_or_option_is_kept_in_the_assistant_code():
     code = "\n".join((ROOT / path).read_text(encoding="utf-8")
-                     for path in ("app/apartment_chat.py", "app/crm_api.py", "app/main.py", "static/index.html"))
-    # The language toggle's own labels (docs/instructions19.md) are the same words as the fixture's
-    # language options; they are the page's text, not CRM options.
-    code = code.replace('other_language: "עברית"', "").replace('other_language: "English"', "")
+                     for path in ("app/apartment_chat.py", "app/person_chat.py", "app/crm_api.py", "app/main.py",
+                                  "static/index.html"))
     # Quoted: a string literal for a key, label or option (plain words like "English" appear in page text).
-    for field in ADMIN_FIELDS:
+    for field in ADMIN_FIELDS + [HE_STATUS]:
         assert field["field_key"] not in code
-        assert f'"{field["label_en"]}"' not in code and f'"{field["label"]}"' not in code
+        assert f'"{field["label"]}"' not in code
         for option in field.get("options", []):
-            for text in (option["value"], option["label"], option["label_en"]):
+            for text in (option["value"], option["label"]):
                 if isinstance(text, str):  # report numbers' values are ids, not names
                     assert f'"{text}"' not in code
-    for old in ("jewish_status", "Jewish_status", "label_he", "/apartments/fields", "mezuzah", "report_number"):
+    for old in ("jewish_status", "Jewish_status", "label_he", "label_en", "/apartments/fields", "mezuzah",
+                "report_number", "/dashboard/apartments/"):
         assert old not in code
 
 
-# --- labels by the user's language (docs/instructions19.md) ----------------------------
+# --- labels exactly as the CRM sent them (fixes118 decisions 3-4) ------------------------
 
-ONE_LANGUAGE = {"field_key": "customfield.apartment.notes_x", "label": "הערות מיוחדות", "label_en": None,
-                "kind": "single_option", "current_value": "b",
-                "options": [{"value": "a", "label": None, "label_en": "Only English"},
-                            {"value": "b", "label": "רק עברית", "label_en": None},
-                            {"value": "c-7", "label": None, "label_en": None}]}
-ENGLISH_ONLY = {"field_key": "customfield.apartment.code_y", "label": None, "label_en": "Gate code",
-                "kind": "text", "current_value": "A-17"}
+ODD_LABELS = {"field_key": "customfield.apartment.notes_x", "label": "הערות מיוחדות",
+              "kind": "single_option", "current_value": "b",
+              "options": [{"value": "a", "label": "Only English"},
+                          {"value": "b", "label": "רק עברית"},
+                          {"value": "c-7", "label": None}]}
+NO_LABEL = {"field_key": "customfield.apartment.code_y", "label": None, "kind": "text", "current_value": "A-17"}
 
 
 @pytest.mark.parametrize("language", ["en", "he"])
-def test_labels_follow_the_language_and_one_language_items_show_as_they_are(client, fake_crm, language):
-    apartment = apt(apartment_id=4071, lineage_id=902, fields=[STATUS, ONE_LANGUAGE, ENGLISH_ONLY])
+def test_labels_are_shown_exactly_as_sent_in_either_language(client, fake_crm, language):
+    """The chat never picks or invents a second language: the CRM's one label, whatever its
+    language, and the key or value only when the CRM sent no label at all."""
+    apartment = apt(apartment_id=4071, lineage_id=902, fields=[STATUS, ODD_LABELS, NO_LABEL])
     fake_crm.answers += [search(apartment), ok(apartment)]
     data = turn(client, "Herzl", language=language)
-    # label_en in English, label in Hebrew; a label in one language only is shown as it is.
-    expected = (["1. Jewish status", "2. הערות מיוחדות", "3. Gate code"] if language == "en"
-                else ["1. סטטוס יהודי", "2. הערות מיוחדות", "3. Gate code"])
-    for line in expected:
+    for line in ["1. Jewish status", "2. הערות מיוחדות", "3. customfield.apartment.code_y"]:
         assert line in data["reply"]
-    assert "#4071" in data["reply"] and "Herzl 10, Tel Aviv" in data["reply"]  # IDs and CRM values as given
+    assert "4071" not in data["reply"] and "Herzl 10, Tel Aviv" in data["reply"]
     assert data["state"]["apartment_id"] == 4071 and data["state"]["lineage_id"] == 902
     fake_crm.answers.append(ok(apartment))
     value = turn(client, "2", data["state"], language=language)
-    # Options: same rule; one with no label at all shows its value; the value sent is the CRM's.
     assert [c["label"] for c in value["choices"]] == ["1. Only English", "2. רק עברית", "3. c-7"]
     assert [c["message"] for c in value["choices"]] == ["1", "2", "3"]
     fake_crm.answers.append(ok(apartment))
     confirm = turn(client, "3", value["state"], language=language)
-    fake_crm.answers.append(answer(with_value(apt(4072, 902, fields=[STATUS, ONE_LANGUAGE, ENGLISH_ONLY]),
-                                              ONE_LANGUAGE["field_key"], "c-7"), ONE_LANGUAGE["field_key"],
+    fake_crm.answers.append(answer(with_value(apt(4072, 902, fields=[STATUS, ODD_LABELS, NO_LABEL]),
+                                              ODD_LABELS["field_key"], "c-7"), ODD_LABELS["field_key"],
                                    previous=4071))
     turn(client, "yes" if language == "en" else "כן", confirm["state"], language=language)
-    assert json.loads(posts(fake_crm)[-1].content) == {"field_key": "customfield.apartment.notes_x", "value": "c-7"}
+    assert sent(posts(fake_crm)[-1]) == {"field_key": "customfield.apartment.notes_x", "value": "c-7"}
     assert posts(fake_crm)[-1].url.path == "/api/assistant/apartments/4071/update"
+
+
+def test_a_label_en_from_an_older_crm_is_ignored(client, fake_crm):
+    old = dict(STATUS, label="סטטוס יהודי", label_en="Jewish status")
+    fake_crm.answers.append(search(apt(fields=[old])))
+    data = turn(client, "Herzl")
+    assert "1. סטטוס יהודי" in data["reply"] and "Jewish status" not in data["reply"]
+
+
+# --- the CRM link (fixes118 decision 8) ----------------------------------------------
+
+def test_the_link_is_crm_web_url_plus_the_crms_web_path(client, fake_crm, monkeypatch):
+    monkeypatch.setenv("CRM_WEB_URL", "https://crm.example.org/")
+    fake_crm.answers.append(search(apt(57797, 35852)))
+    data = turn(client, "Herzl")
+    assert data["link"]["url"] == "https://crm.example.org/dashboard/apartments/lineage/35852"
+    assert data["link"]["label"] == "Open in the CRM"
+    # After a save the link stays the lineage one: it always opens the current version.
+    fake_crm.answers += [ok(apt(57797, 35852)), ok(apt(57797, 35852))]
+    value = turn(client, "1", data["state"])
+    confirm = turn(client, "2", value["state"])
+    fake_crm.answers.append(answer(apt(57798, 35852), STATUS["field_key"], previous=57797))
+    saved = turn(client, "yes", confirm["state"])
+    assert saved["link"]["url"] == "https://crm.example.org/dashboard/apartments/lineage/35852"
+
+
+@pytest.mark.parametrize("web_path", [None, "dashboard/x", "//evil.example/x", "/x?y=1", "https://evil.example/",
+                                      "/a/../b", 17])
+def test_no_link_without_crm_web_url_or_for_an_odd_web_path(client, fake_crm, monkeypatch, web_path):
+    monkeypatch.setenv("CRM_WEB_URL", "https://crm.example.org")
+    fake_crm.answers.append(search(apt(web_path=web_path)))
+    assert "link" not in turn(client, "Herzl")
+    monkeypatch.delenv("CRM_WEB_URL")
+    fake_crm.answers.append(search(apt()))
+    assert "link" not in turn(client, "Herzl")

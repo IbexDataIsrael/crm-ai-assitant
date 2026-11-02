@@ -347,6 +347,7 @@
     let searchState = null;   // search state, as the server returned it (an add offer waiting)
     let conversation = null;  // create_contact state, as the server returned it
     let apartmentState = null;  // edit_apartment state, as the server returned it
+    let personState = null;  // person state (open / edit a field / record a visit), as the server returned it
     // One turn at a time: while a request is in flight, sending and every
     // choice button are off, so one tap can never send an update twice.
     let busy = false;
@@ -366,6 +367,7 @@
       intent = null;
       conversation = null;
       apartmentState = null;
+      personState = null;
       searchState = null;
       show(cancelButton, false);
     }
@@ -375,6 +377,7 @@
     function cancelOperation() {
       if (busy || !intent) return;
       const uncertain = (apartmentState && apartmentState.step === "blocked")
+        || (personState && (personState.step === "blocked" || personState.step === "visit_blocked"))
         || (conversation && conversation.pending && conversation.pending.uncertain);
       addUser(t("cancel"));
       log.querySelectorAll("button, input").forEach(n => { n.disabled = true; });
@@ -559,7 +562,7 @@
     function pick(choice) {
       if (busy) return;
       if (choice.action === "open_apartment") choose("edit_apartment", choice.label, { open_id: choice.id });
-      else if (choice.action === "open_person") choose("open_person", choice.label, { open_id: choice.id });
+      else if (choice.action === "open_person") choose("person", choice.label, { open_id: choice.id });
       else if (choice.action === "add_person") choose("create_contact", choice.label);
       else if (choice.action === "dismiss") {
         // "No" to the add offer: the server answers it (the offer is in searchState).
@@ -652,6 +655,7 @@
         div.appendChild(row);
         if (long) addFilter(row, buttons);
       }
+      if (data.link) addLink(div, data.link);
       if (data.awaiting_check) {
         const row = el("div", "choices apt-choices");
         [t("yes"), t("no")].forEach(word => {
@@ -684,6 +688,7 @@
       const body = { intent: intent || "search", message, language, ...(extra || {}) };
       if (intent === "create_contact" && conversation) body.state = conversation;
       if (intent === "edit_apartment" && apartmentState) body.apartment_state = apartmentState;
+      if (intent === "person" && personState) body.person_state = personState;
       if (!intent && searchState) body.search_state = searchState;
       try {
         const res = await fetch("/assistant/turn", { method: "POST", headers, body: JSON.stringify(body) });
@@ -711,6 +716,13 @@
           intent = "edit_apartment";
           show(cancelButton, true);
           apartmentState = data.state;
+          addApartmentReply(data);
+          if (data.logout) logout(data.reply);
+        } else if (data.intent === "person") {
+          // A person: the same step-by-step buttons as an apartment (edit a field, record a visit).
+          intent = "person";
+          show(cancelButton, true);
+          personState = data.state;
           addApartmentReply(data);
           if (data.logout) logout(data.reply);
         } else if (data.intent === "create_contact") {

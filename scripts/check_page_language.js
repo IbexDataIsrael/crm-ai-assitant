@@ -364,17 +364,28 @@ const noSave = calls => !calls.some(c => c.url === "/assistant/language");
       && text.includes("People") && text.includes("Apartments"));
     check("results: each record is a button", !!button(document, "Yosef Cohen (#5)") && !!button(document, APT.label));
     check("results: no cancel after a search (nothing is open)", $(document, "cancel").classList.contains("hidden"));
-    next = () => [200, { intent: "search", outcome: "not_available", reply: "Not yet.\nOpen: https://app.example.org/dashboard/contacts/5",
-                         prompt: "Not yet.", choices: [], search_state: { offer_add: false, language: "en" },
-                         link: { label: "Open this person's page in the CRM:", url: "https://app.example.org/dashboard/contacts/5" } }];
+    const personState = { step: "menu", language: "en", contact_id: 5, field_key: null, shown: null, pending: null, visit: null };
+    next = () => [200, { intent: "person", outcome: "menu", reply: "Yosef Cohen\n- First name: Yosef",
+                         prompt: "Yosef Cohen\n- First name: Yosef", state: personState,
+                         choices: [{ label: "Edit a field", message: "[edit]" }, { label: "Record a visit", message: "[visit]" }],
+                         link: { label: "Open in the CRM", url: "https://app.example.org/dashboard/contacts/5" } }];
     button(document, "Yosef Cohen (#5)").click();
     await settle();
     const opened = calls.filter(c => c.url === "/assistant/turn").pop();
-    check("a person picked from the results is sent as open_person", opened.body.intent === "open_person" && opened.body.open_id === 5);
+    check("a person picked from the results is sent as intent person", opened.body.intent === "person" && opened.body.open_id === 5);
     const link = log(document).all().find(n => n.tag === "a");
     check("person: a link to the CRM page, in a new tab", link && link.getAttribute("href") === "https://app.example.org/dashboard/contacts/5"
       && link.getAttribute("target") === "_blank" && link.getAttribute("rel").includes("noopener"));
-    check("person: back to the text box (no flow open)", $(document, "cancel").classList.contains("hidden"));
+    check("person: edit / visit buttons", !!button(document, "Edit a field") && !!button(document, "Record a visit"));
+    next = () => [200, { intent: "person", outcome: "choose_field", reply: "Which field?", prompt: "Which field?",
+                         state: { ...personState, step: "choose_field" }, choices: [{ label: "1. First name", message: "1" }] }];
+    button(document, "Edit a field").click();
+    await settle();
+    const edit = calls.filter(c => c.url === "/assistant/turn").pop();
+    check("person: the next turn carries person_state, no token in it", edit.body.intent === "person" && edit.body.message === "[edit]"
+      && edit.body.person_state.contact_id === 5 && !JSON.stringify(edit.body.person_state).includes("token"));
+    $(document, "cancel").click();
+    await settle();
     check("old result buttons are off after a new answer", button(document, "Yosefa Cohen (#6)").disabled === true);
     next = () => [200, { intent: "search", outcome: "x", reply: "x", prompt: "x", choices: [],
                          link: { label: "bad", url: "javascript:alert(1)" } }];

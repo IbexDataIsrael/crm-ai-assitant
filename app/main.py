@@ -15,9 +15,10 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, Field
 
 from app import apartment_chat, contact_chat, crm, crm_api, generation, knowledge
-from app import planner, rate_limit, search_chat
+from app import person_chat, planner, rate_limit, search_chat
 from app.apartment_chat import ApartmentEditState
 from app.contact_chat import ContactDraftFields, ConversationState
+from app.person_chat import PersonState
 from app.search_chat import SearchState
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -375,12 +376,14 @@ class TurnRequest(BaseModel):
 
     # search = the free-text box (docs/instructions20.md); the others continue a flow the
     # page is in (a button tap or an earlier answer started it). Never read from free text.
-    intent: Literal["search", "open_person", "create_contact", "update_contact", "edit_apartment", "ask_question"]
+    intent: Literal["search", "person", "create_contact", "update_contact", "edit_apartment", "ask_question"]
     # Empty when a flow was just started by a button.
     message: str = ""
-    # A record picked from the search results: a contact id (open_person) or an apartment's
+    # A record picked from the search results: a contact id (person) or an apartment's
     # lineage id (edit_apartment). Only ever looked up through the CRM with the user's token.
     open_id: Optional[int] = Field(default=None, gt=0)
+    # Held by the page between turns (person only). Contains no token.
+    person_state: Optional[PersonState] = None
     # Held by the page between search turns (only: is an add offer waiting for a yes). No token.
     search_state: Optional[SearchState] = None
     # Held by the page between turns (create_contact only). Contains no token.
@@ -400,7 +403,7 @@ def assistant_turn(
 ):
     """One step of the conversation. Every intent needs a login the CRM confirms
     first; the token then goes only to the CRM (login check and bridge)."""
-    held = request.apartment_state or request.state or request.search_state
+    held = request.apartment_state or request.person_state or request.state or request.search_state
     language = request.language or (held.language if held else "en")
     token, role, refusal = _require_login_with_role(http_request, credentials, language, intent=request.intent)
     if refusal is not None:
@@ -417,10 +420,17 @@ def _turn(token: str, role: Optional[str], request: TurnRequest, language: str) 
         state.language = language
         return search_chat.handle_turn(token, message, state, role)
 
-    if request.intent == "open_person":
-        if request.open_id is None:
+    if request.intent == "person":
+        # sheepsidebay_crm fixes117: admin and staff only (the CRM answers 404 to anyone else).
+        if not search_chat.may_see_people(role):
+            return search_chat.people_refused(language)
+        if request.open_id is not None:  # picked from the search results
+            return person_chat.open_person(token, language, request.open_id)
+        if request.person_state is None:
             return search_chat.handle_turn(token, "", SearchState(language=language), role)
-        return search_chat.open_person(language, request.open_id, role)
+        state = request.person_state
+        state.language = language
+        return person_chat.handle_turn(token, message, state)
 
     if request.intent == "update_contact":
         # Not built: never calls the bridge or the CRM.

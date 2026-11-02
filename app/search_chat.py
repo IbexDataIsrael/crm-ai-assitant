@@ -8,8 +8,8 @@ id and is offered as a button that opens the record inside the chat.
 
 A smart bot, not free AI: every step is a fixed path (search, list, open, edit,
 add, confirm). Nothing here changes anything in the CRM; opening and editing
-go to the existing flows (app/apartment_chat.py, app/contact_chat.py), which
-keep their own confirm-before-save rules.
+go to the flows (app/apartment_chat.py, app/person_chat.py,
+app/contact_chat.py), which keep their own confirm-before-save rules.
 
 Permissions: the CRM decides what each user may see. On top of that the chat
 never shows people to a role other than admin or staff (an activist or a
@@ -90,9 +90,7 @@ MESSAGES = {
         "change_pick": "Choose the record you want to change:",
         "person_line": "{name}{address}{status} (#{id})",
         "no_name": "(no name)",
-        "open_person": "Opening a person inside the chat isn't available yet - it needs a CRM update.",
-        "open_person_link": "Open this person's page in the CRM:",
-        "open_person_no_link": "The CRM web address isn't configured here (CRM_WEB_URL), so I can't link to the page.",
+        "people_not_allowed": "People aren't available for your role through the assistant.",
         "yes": "Yes",
         "no": "No",
         "unauthorized": "Your CRM login is no longer valid. Please log in again.",
@@ -127,9 +125,7 @@ MESSAGES = {
         "change_pick": "בחרו את הרשומה שתרצו לשנות:",
         "person_line": "{name}{address}{status} (#{id})",
         "no_name": "(ללא שם)",
-        "open_person": "פתיחת אדם בתוך הצ'אט עדיין אינה זמינה - היא דורשת עדכון ב-CRM.",
-        "open_person_link": "פתיחת הדף של האדם ב-CRM:",
-        "open_person_no_link": "כתובת האתר של ה-CRM לא הוגדרה כאן (CRM_WEB_URL), ולכן אין קישור לדף.",
+        "people_not_allowed": "אנשים אינם זמינים לתפקיד שלכם דרך העוזר.",
         "yes": "כן",
         "no": "לא",
         "unauthorized": "ההתחברות ל-CRM אינה תקפה עוד. אנא התחברו מחדש.",
@@ -196,8 +192,9 @@ def person_line(lang: str, person: dict) -> str:
 
 
 def apartment_line(lang: str, apt: Apartment) -> str:
+    """"address, apartment X, floor Y - resident": never the internal apartment id (fixes118)."""
     resident = apartment_chat.say(lang, "resident", name=apt.resident_name) if apt.resident_name else ""
-    return f"{full_address(lang, apt)}{resident} (#{apt.apartment_id})"
+    return f"{full_address(lang, apt)}{resident}"
 
 
 def _count(lang: str, key: str, n: int) -> str:
@@ -323,20 +320,9 @@ def start_add(lang: str, role: Optional[str]) -> dict:
     return contact_chat.start(lang)
 
 
-def open_person(lang: str, contact_id: int, role: Optional[str]) -> dict:
-    """No CRM contact endpoint for the helper yet (owner: wait): say so, and link to the
-    person's full page in the CRM web app, which checks the permission itself."""
-    state = SearchState(language=lang)
-    if not may_see_people(role):
-        return _answer(state, "forbidden", say(lang, "add_not_allowed"))
-    url = crm_api.contact_page_url(contact_id)
-    reply = say(lang, "open_person")
-    if url:
-        label = say(lang, "open_person_link")
-        answer = _answer(state, "not_available", reply + "\n" + label + " " + url, prompt=reply)
-        answer["link"] = {"label": label, "url": url}
-        return answer
-    return _answer(state, "not_available", reply + "\n" + say(lang, "open_person_no_link"))
+def people_refused(lang: str) -> dict:
+    """A role that may not see people asked to open one: refused before any CRM call."""
+    return _answer(SearchState(language=lang), "forbidden", say(lang, "people_not_allowed"))
 
 
 def _failure(state: SearchState, body: dict) -> dict:

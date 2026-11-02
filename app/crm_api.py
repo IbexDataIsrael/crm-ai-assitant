@@ -104,10 +104,18 @@ def crm_web_url() -> str | None:
     return f"{parts.scheme}://{parts.netloc}{parts.path.rstrip('/')}"
 
 
-def contact_page_url(contact_id: int) -> str | None:
-    """The person's full page in the CRM web app (/dashboard/contacts/{id}), or None."""
+# A CRM `web_path` (sheepsidebay_crm fixes117/118): a plain absolute path to the record's
+# page in the CRM web app, named by the CRM (letters, digits, - and _ between slashes).
+WEB_PATH_PATTERN = re.compile(r"^(/[A-Za-z0-9_-]+)+$")
+
+
+def web_link(path) -> str | None:
+    """CRM_WEB_URL + the `web_path` the CRM sent, or None (no CRM_WEB_URL, or an odd path).
+    Links are never built here from ids: the CRM names the page."""
     base = crm_web_url()
-    return f"{base}/dashboard/contacts/{contact_id}" if base and _is_id(contact_id) else None
+    if not base or not isinstance(path, str) or not WEB_PATH_PATTERN.match(path):
+        return None
+    return base + path
 
 
 def make_http_client(base_url: str) -> httpx.Client:
@@ -395,14 +403,16 @@ def confirm_proposal(token: str, proposal_id: str, payload_hash: str, fields: di
     return _failure(502, "uncertain", uncertain_message, **retry)
 
 
-# --- Apartment edit (sheepsidebay_crm docs/fixes115.md) ------------------------
+# --- Apartment edit (sheepsidebay_crm docs/fixes115.md, fixes118.md) ------------
 # The CRM's GET /api/assistant/apartments/search, /getapartment?id= and
 # POST /{id}/update (backend/app/routers/assistant_apartments.py). Every
 # apartment comes with its `editable_fields`, decided by the CRM per user and
-# apartment. Same rules as the contact bridge: the user's token only, to
-# CRM_API_URL only, no redirects. Reads are safe to repeat. An update whose
-# answer is lost is "uncertain" and is NEVER resent by this module: the caller
-# re-reads the lineage instead.
+# apartment, each with ONE `label` in the user's CRM language. Same rules as
+# the contact bridge: the user's token only, to CRM_API_URL only, no
+# redirects. Reads are safe to repeat. An update whose answer is lost is
+# "uncertain" and is never resent by this module; the conversation may send
+# the SAME request_id with the SAME body once the user says yes, which the CRM
+# answers from its record (`replayed`) and can never write twice.
 
 APARTMENTS_PATH = "/api/assistant/apartments"
 OPTION_KINDS = ("single_option", "multi_option")
@@ -423,12 +433,11 @@ def _is_label(value) -> bool:
 
 
 def _is_option(option) -> bool:
-    """value is a string, or a number (report numbers); labels may be missing."""
+    """value is a string, or a number (report numbers); the label may be missing."""
     if not isinstance(option, dict):
         return False
     value = option.get("value")
-    return ((isinstance(value, str) or _is_int(value))
-            and _is_label(option.get("label")) and _is_label(option.get("label_en")))
+    return (isinstance(value, str) or _is_int(value)) and _is_label(option.get("label"))
 
 
 def _is_int(value) -> bool:
@@ -439,8 +448,7 @@ def _is_editable_field(entry) -> bool:
     """One editable_fields entry. The kind is only checked to be a string: a kind
     the chat doesn't know is left out by the conversation, not an error here."""
     if not (isinstance(entry, dict) and isinstance(entry.get("field_key"), str) and entry["field_key"]
-            and isinstance(entry.get("kind"), str)
-            and _is_label(entry.get("label")) and _is_label(entry.get("label_en"))):
+            and isinstance(entry.get("kind"), str) and _is_label(entry.get("label"))):
         return False
     options = entry.get("options")
     if entry["kind"] in OPTION_KINDS:
@@ -549,43 +557,63 @@ def search_everything(token: str, query: str) -> BridgeResult:
     })
 
 
-def update_apartment_field(token: str, apartment_id: int, field_key: str, value) -> BridgeResult:
-    """One field of one apartment version. "updated"/"unchanged" come only from the
-    CRM's success answer, with the value and the apartment the CRM read back."""
-    if not _is_id(apartment_id):
-        return _failure(404, "not_found", "No such apartment for this user.")
-    uncertain_message = ("The CRM's answer was lost, so it is not known whether the change was saved. "
-                         "It was not resent; read the apartment again to find out.")
-    try:
-        response = _send(f"{APARTMENTS_PATH}/{apartment_id}/update", token, {"field_key": field_key, "value": value})
-    except CRMConfigError as error:
-        return _failure(503, "crm_not_configured", str(error))
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        logger.warning("CRM apartment update: could not connect")
-        return _failure(502, "crm_unreachable", "Could not reach the CRM; the change was not sent.")
-    except httpx.HTTPError as error:
-        logger.warning("CRM apartment update: outcome uncertain (%s)", type(error).__name__)
-        return _failure(504, "uncertain", uncertain_message)
+UNCERTAIN_MESSAGE = ("The CRM's answer was lost, so it is not known whether the change was saved. "
+                     "Only the same request_id with the same request may be sent again to find out.")
 
-    code = response.status_code
-    logger.info("CRM apartment update answer: HTTP %s", code)
+
+def _write(path: str, token: str, body: dict, what: str) -> tuple[BridgeResult | None, httpx.Response | None]:
+    """(failure, None) or (None, the CRM's response) for one write. A lost answer is "uncertain"
+    (the CRM may have saved), a refused connection "crm_unreachable" (nothing was sent)."""
+    try:
+        response = _send(path, token, body)
+    except CRMConfigError as error:
+        return _failure(503, "crm_not_configured", str(error)), None
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        logger.warning("CRM %s: could not connect", what)
+        return _failure(502, "crm_unreachable", "Could not reach the CRM; the change was not sent."), None
+    except httpx.HTTPError as error:
+        logger.warning("CRM %s: outcome uncertain (%s)", what, type(error).__name__)
+        return _failure(504, "uncertain", UNCERTAIN_MESSAGE), None
+    logger.info("CRM %s answer: HTTP %s", what, response.status_code)
     failure = _common_failure(response)
     if failure:
+        return failure, None
+    if response.status_code >= 500:
+        return _failure(502, "uncertain", UNCERTAIN_MESSAGE), None
+    return None, response
+
+
+def _json_or_none(response: httpx.Response):
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def update_apartment_field(token: str, apartment_id: int, field_key: str, value,
+                           request_id: str | None = None) -> BridgeResult:
+    """One field of one apartment version. "updated"/"unchanged" come only from the
+    CRM's success answer, with the value and the apartment the CRM read back;
+    `replayed` is the CRM's proof that an earlier send of this request_id was saved."""
+    if not _is_id(apartment_id):
+        return _failure(404, "not_found", "No such apartment for this user.")
+    body = {"field_key": field_key, "value": value}
+    if request_id:
+        body["request_id"] = request_id
+    failure, response = _write(f"{APARTMENTS_PATH}/{apartment_id}/update", token, body, "apartment update")
+    if failure:
         return failure
-    if code >= 500:
-        return _failure(502, "uncertain", uncertain_message)
+    code = response.status_code
     if code == 404:
         return _failure(404, "not_found", "No such apartment for this user.")
     if code == 409:
         return _failure(409, "stale", "The apartment was changed meanwhile; nothing was saved.")
-    try:
-        data = response.json()
-    except ValueError:
-        data = None
+    data = _json_or_none(response)
     if (code == 200 and isinstance(data, dict) and data.get("status") in ("updated", "unchanged")
             and _is_id(data.get("apartment_id")) and _is_apartment(data.get("apartment"))):
         return BridgeResult(200, {
             "status": data["status"],
+            "replayed": data.get("replayed") is True,
             "field_key": data.get("field_key"),
             "value": data.get("value"),
             "apartment_id": data["apartment_id"],
@@ -594,7 +622,105 @@ def update_apartment_field(token: str, apartment_id: int, field_key: str, value)
             "apartment": data["apartment"],
         })
     # A 2xx we cannot read: the CRM may have saved, so do not claim either way.
-    return _failure(502, "uncertain", uncertain_message)
+    return _failure(502, "uncertain", UNCERTAIN_MESSAGE)
+
+
+# --- Contacts (sheepsidebay_crm fixes117: backend/app/routers/assistant_contacts.py) ----
+# GET /api/assistant/contacts/{id}, POST /{id}/update and POST /{id}/visits. Admin and
+# staff only (the CRM answers 404 to everyone else, the same as a missing contact).
+# Contacts keep their id on save (no versions). Writes carry a request_id like the
+# apartment update.
+
+CONTACTS_PATH = "/api/assistant/contacts"
+
+
+def _is_visit_field(entry) -> bool:
+    """One new_visit_fields entry; like an editable field, without a current value."""
+    return _is_editable_field(entry)
+
+
+def _is_visit(data) -> bool:
+    return (isinstance(data, dict) and _is_id(data.get("visit_id"))
+            and _is_text(data.get("visit_date")) and _is_text(data.get("visit_type"))
+            and isinstance(data.get("done"), list) and all(isinstance(d, str) for d in data["done"])
+            and _is_text(data.get("notes")))
+
+
+def _is_contact(data) -> bool:
+    """The fields of the CRM's contact view that the chat relies on."""
+    return (isinstance(data, dict) and _is_id(data.get("contact_id"))
+            and data.get("status") in ("active", "draft") and _is_text(data.get("status_label"))
+            and all(_is_text(data.get(k)) for k in ("name", "last_name", "phone", "email", "address"))
+            and isinstance(data.get("editable_fields"), list)
+            and all(_is_editable_field(f) for f in data["editable_fields"])
+            and isinstance(data.get("can_add_visit"), bool)
+            and isinstance(data.get("new_visit_fields"), list)
+            and all(_is_visit_field(f) for f in data["new_visit_fields"])
+            and isinstance(data.get("recent_visits"), list)
+            and all(_is_visit(v) for v in data["recent_visits"]))
+
+
+def get_contact(token: str, contact_id: int) -> BridgeResult:
+    """The contact as this user may see it, with what may be edited and recorded. A read."""
+    if not _is_id(contact_id):
+        return _failure(404, "not_found", "No such contact for this user.")
+    failure, data = _read(f"{CONTACTS_PATH}/{contact_id}", token)
+    if failure:
+        if failure.body["status"] == "not_found":
+            failure.body["message"] = "No such contact for this user."
+        return failure
+    if not _is_contact(data):
+        return _failure(502, "crm_contract_error", "The CRM's contact answer had an unexpected shape.")
+    return BridgeResult(200, {"status": "ok", "contact": data})
+
+
+def update_contact_field(token: str, contact_id: int, field_key: str, value, request_id: str) -> BridgeResult:
+    """One field of one contact; the answer carries the value and the contact the CRM read back."""
+    if not _is_id(contact_id):
+        return _failure(404, "not_found", "No such contact for this user.")
+    body = {"field_key": field_key, "value": value, "request_id": request_id}
+    failure, response = _write(f"{CONTACTS_PATH}/{contact_id}/update", token, body, "contact update")
+    if failure:
+        return failure
+    code = response.status_code
+    if code == 404:
+        return _failure(404, "not_found", "No such contact for this user.")
+    data = _json_or_none(response)
+    if (code == 200 and isinstance(data, dict) and data.get("status") in ("updated", "unchanged")
+            and _is_contact(data.get("contact"))):
+        return BridgeResult(200, {
+            "status": data["status"],
+            "replayed": data.get("replayed") is True,
+            "field_key": data.get("field_key"),
+            "value": data.get("value"),
+            "contact": data["contact"],
+        })
+    return _failure(502, "uncertain", UNCERTAIN_MESSAGE)
+
+
+def add_visit(token: str, contact_id: int, values: dict, request_id: str) -> BridgeResult:
+    """One new visit, the whole visit in one call. The CRM answers 409 for a draft contact."""
+    if not _is_id(contact_id):
+        return _failure(404, "not_found", "No such contact for this user.")
+    body = {"values": values, "request_id": request_id}
+    failure, response = _write(f"{CONTACTS_PATH}/{contact_id}/visits", token, body, "new visit")
+    if failure:
+        return failure
+    code = response.status_code
+    if code == 404:
+        return _failure(404, "not_found", "No such contact for this user.")
+    if code == 409:
+        return _failure(409, "approve_first", "The CRM records visits only for an approved contact.")
+    data = _json_or_none(response)
+    if (code == 201 and isinstance(data, dict) and data.get("status") == "created"
+            and _is_id(data.get("visit_id")) and (data.get("visit") is None or _is_visit(data["visit"]))):
+        return BridgeResult(201, {
+            "status": "created",
+            "replayed": data.get("replayed") is True,
+            "visit_id": data["visit_id"],
+            "visit": data.get("visit"),
+        })
+    return _failure(502, "uncertain", UNCERTAIN_MESSAGE)
 
 
 # --- The user's language (docs/instructions19.md) ------------------------------
