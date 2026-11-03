@@ -96,6 +96,7 @@
         logged_in: "Logged in to the CRM.",
         log_out: "Log out",
         placeholder: "Type a message...",
+        placeholder_value: "Type the new value here...",
         send: "Send",
         cancel: "Cancel",
         cancelled: "Cancelled. Nothing more will be sent to the CRM.",
@@ -147,6 +148,7 @@
         logged_in: "מחוברים ל-CRM.",
         log_out: "התנתקות",
         placeholder: "כתבו הודעה...",
+        placeholder_value: "כתבו כאן את הערך החדש...",
         send: "שליחה",
         cancel: "ביטול",
         cancelled: "בוטל. לא יישלח עוד דבר ל-CRM.",
@@ -641,15 +643,23 @@
       }
       log.appendChild(div);
       div.scrollIntoView();
+      // A value to type (text, number, date): the only button may be "Clear the value", so point
+      // at the message box instead - it gets the focus and says what to type there.
+      wantsTyping = data.outcome === "choose_value" && choices.every(c => data.clear && c.message === data.clear.message);
     }
+
+    let wantsTyping = false;
 
     async function sendTurn(message, extra) {
       if (busy) return;
       setBusy(true);
+      wantsTyping = false;
       try {
         await sendTurnNow(message, extra);
       } finally {
         setBusy(false);
+        input.placeholder = t(wantsTyping ? "placeholder_value" : "placeholder");
+        if (wantsTyping) input.focus();
       }
     }
 

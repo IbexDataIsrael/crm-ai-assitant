@@ -179,9 +179,9 @@ MESSAGES = {
                         "then \"Continue\":",
         "continue": "Continue",
         "choose_yes_no": "{label} - current value: {current}. Yes or no?",
-        "type_text": "{label} - current value: {current}. Type the new value:",
-        "type_number": "{label} - current value: {current}. Type the new number:",
-        "type_date": "{label} - current value: {current}. Type the new date, day first "
+        "type_text": "{label} - current value: {current}. Type the new value in the message box below:",
+        "type_number": "{label} - current value: {current}. Type the new number in the message box below:",
+        "type_date": "{label} - current value: {current}. Type the new date in the message box below, day first "
                      "(for example 29/10/2026) or as 2026-10-29:",
         "not_understood_value": "I didn't understand that value.",
         "bad_date": "That is not a real date. Type it day first, for example 29/10/2026.",
@@ -265,9 +265,9 @@ MESSAGES = {
         "choose_multi": "{label} - כרגע: {current}. הקישו על כל ערך שצריך להיות (הקשה נוספת מבטלת), ואז \"המשך\":",
         "continue": "המשך",
         "choose_yes_no": "{label} - הערך הנוכחי: {current}. כן או לא?",
-        "type_text": "{label} - הערך הנוכחי: {current}. כתבו את הערך החדש:",
-        "type_number": "{label} - הערך הנוכחי: {current}. כתבו את המספר החדש:",
-        "type_date": "{label} - הערך הנוכחי: {current}. כתבו את התאריך החדש, יום קודם "
+        "type_text": "{label} - הערך הנוכחי: {current}. כתבו את הערך החדש בתיבת ההודעה למטה:",
+        "type_number": "{label} - הערך הנוכחי: {current}. כתבו את המספר החדש בתיבת ההודעה למטה:",
+        "type_date": "{label} - הערך הנוכחי: {current}. כתבו את התאריך החדש בתיבת ההודעה למטה, יום קודם "
                      "(למשל 29/10/2026) או בצורה 2026-10-29:",
         "not_understood_value": "לא הבנתי את הערך.",
         "bad_date": "זה אינו תאריך קיים. כתבו אותו יום קודם, למשל 29/10/2026.",
