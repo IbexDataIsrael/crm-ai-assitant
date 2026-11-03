@@ -1,3 +1,4 @@
+
 name: Deploy crm-ai-assitant to VPS
 
 on:
@@ -20,24 +21,24 @@ jobs:
     steps:
       - name: Set up restricted SSH credentials
         env:
-          ASSISTANT_DEPLOY_KEY: ${{ secrets.ASSISTANT_DEPLOY_KEY }}
+          ASSISTANT_DEPLOY_KEY: ${{ secrets.CONTABO_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           install -m 700 -d ~/.ssh
           printf '%s\n' "$ASSISTANT_DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          printf '167.233.238.179 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIH122dZIBcsUKG8ICfdhUf3l9HiZLJcCTrcZqJ0TGXpm\n' > ~/.ssh/known_hosts
+          printf '31.220.85.107 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHHUht3KZ7v++YLETJTsj0pu70Jz3RUqPsIw7nmbFSrg\n' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null
 
       - name: Deploy main on VPS
         env:
-          VPS_USER: zvi
+          VPS_USER: root
         run: |
           set -euo pipefail
-          test "$VPS_USER" = "zvi"
+          test "$VPS_USER" = "root"
           ssh -i ~/.ssh/id_ed25519 \
             -o IdentitiesOnly=yes \
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
-            "$VPS_USER@167.233.238.179" "deploy ${{ github.sha }}"
+            "$VPS_USER@31.220.85.107" "deploy ${{ github.sha }}"
