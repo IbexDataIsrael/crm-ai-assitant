@@ -190,7 +190,59 @@ def test_add_visit_searches_only_the_person_never_the_sentence(client, fake_crm,
     fake_crm.answers.append(found())
     data = turn(client, TEFILLIN, language="he")
     assert searched(fake_crm) == ["ג'ון"]
-    assert data["outcome"] == "no_match" and data["choices"] == []  # never an offer to add
+    assert data["outcome"] == "no_match"
+
+
+# --- nobody found for a visit or a change; "create the contact" next (live test, 3 Nov) ------
+
+def test_a_visit_for_someone_not_found_offers_to_add_them_and_says_a_draft_waits(client, fake_crm, fake_ai):
+    fake_ai.understandings.append({"action": "add_visit", "person": "Dana Katz", "field": "tefillin"})
+    fake_crm.answers.append(found())
+    data = turn(client, "record a visit at Dana Katz, tefillin")
+    assert data["reply"] == ('I found no person you can access for "Dana Katz". Do you want to add "Dana Katz" '
+                             'as a new person?\n(A new person is saved as a draft; a visit can be recorded once '
+                             'the contact is approved in the CRM.)')
+    assert [(c["label"], c["action"], c.get("message")) for c in data["choices"]] == [
+        ("Yes", "add_person", "Dana Katz"), ("No", "dismiss", None)]
+    assert data["search_state"]["offer_add"] is True and data["search_state"]["last_person"] == "Dana Katz"
+
+
+def test_a_change_for_someone_not_found_offers_to_add_without_the_draft_note(client, fake_crm, fake_ai):
+    fake_ai.understandings.append({"action": "edit_contact", "person": "Dana Katz", "field": "phone"})
+    fake_crm.answers.append(found())
+    data = turn(client, "change Dana Katz's phone")
+    assert data["reply"] == 'I found no person you can access for "Dana Katz". Do you want to add "Dana Katz" as a new person?'
+
+
+def test_no_add_offer_when_the_crm_does_not_allow_adding(client, fake_crm, fake_ai):
+    fake_ai.understandings.append({"action": "add_visit", "person": "Dana Katz"})
+    fake_crm.answers.append(found(can_add=False))
+    data = turn(client, "record a visit at Dana Katz")
+    assert data["reply"] == 'I found no person you can access for "Dana Katz".' and data["choices"] == []
+
+
+def test_create_the_contact_next_uses_the_person_just_searched(client, fake_crm, fake_ai):
+    """The screenshot: "can you create the contact" right after "Dana Katz" was not found
+    must not ask "who?" again."""
+    fake_ai.understandings += [{"action": "add_visit", "person": "Dana Katz"}, {"action": "create_contact"}]
+    fake_crm.answers += [found(), found()]
+    first = turn(client, "record a visit at Dana Katz, tefillin")
+    data = turn(client, "can you create the contact", search_state=first["search_state"])
+    sent = fake_ai.interpreter_requests[-1]["input"]
+    assert "<earlier_person>Dana Katz</earlier_person>" in sent
+    assert searched(fake_crm) == ["Dana Katz", "Dana Katz"]
+    assert data["intent"] == "create_contact"
+    assert data["reply"].startswith('No one matching "Dana Katz" exists yet, so let\'s add a new person.')
+    # The add flow reads the details from the remembered name and the user's words.
+    assert "Dana Katz\ncan you create the contact" in fake_ai.extraction_requests[-1]["input"]
+
+
+def test_without_an_earlier_person_a_nameless_request_still_asks_who(client, fake_crm, fake_ai):
+    fake_ai.understandings.append({"action": "create_contact"})
+    data = turn(client, "can you create the contact")
+    assert data["outcome"] == "clarify" and data["reply"] == "Who is it about? Please write the person's name."
+    assert "<earlier_person>" not in fake_ai.interpreter_requests[-1]["input"]
+    assert fake_crm.requests == [] or all(r.url.path != "/api/assistant/search" for r in fake_crm.requests)
 
 
 def test_a_joined_preposition_is_tried_only_when_the_words_as_written_find_no_one(client, fake_crm, fake_ai):

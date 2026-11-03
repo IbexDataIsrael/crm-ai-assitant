@@ -59,7 +59,9 @@ ask - for unclear only: one short clarifying question, in the interface language
 
 Copy the user's words; never translate, correct or invent details the user did not write.
 When two readings are plausible, or the person or field is uncertain, answer "unclear" with a short ask.
-When a clarification answer is given, read it together with the original request."""
+When a clarification answer is given, read it together with the original request.
+When an earlier_person is given, it is the person the conversation was just about: if the request
+refers to a person without naming one ("the contact", "him", "her", "add them"), use earlier_person as person."""
 
 
 class Understanding(BaseModel):
@@ -104,10 +106,12 @@ class _Failed(Exception):
     """The request was not sent, or the reply can't be used."""
 
 
-def build_input(texts: list[str], language: str) -> str:
-    """Only the user-written texts and the interface language."""
-    parts = [f"Interface language: {generation.LANGUAGE_NAMES.get(language, 'English')}",
-             f"<request>\n{escape(texts[0], quote=False)}\n</request>"]
+def build_input(texts: list[str], language: str, earlier_person: Optional[str] = None) -> str:
+    """Only the user-written texts, the interface language and the name the user searched last."""
+    parts = [f"Interface language: {generation.LANGUAGE_NAMES.get(language, 'English')}"]
+    if earlier_person:
+        parts.append(f"<earlier_person>{escape(earlier_person, quote=False)}</earlier_person>")
+    parts.append(f"<request>\n{escape(texts[0], quote=False)}\n</request>")
     if len(texts) > 1:
         parts.append(f"<clarification_answer>\n{escape(texts[1], quote=False)}\n</clarification_answer>")
     return "\n\n".join(parts)
@@ -128,11 +132,13 @@ def parse_reply(text: Optional[str]) -> Understanding:
         raise ValueError(f"{e.error_count()} invalid value(s)") from None
 
 
-def settle(understanding: Understanding, language: str) -> Understanding:
-    """Code's rules on top of the model's answer: a person action without a person, an
-    apartment change without an address, or an unclear answer without a question all
-    become unclear with a generic question."""
+def settle(understanding: Understanding, language: str, earlier_person: Optional[str] = None) -> Understanding:
+    """Code's rules on top of the model's answer: a person action without a person takes the
+    person the conversation was just about, if any; otherwise it, an apartment change without an
+    address, or an unclear answer without a question all become unclear with a generic question."""
     u = understanding
+    if u.action in PERSON_ACTIONS and not u.person and earlier_person:
+        return u.model_copy(update={"person": earlier_person})
     if u.action in PERSON_ACTIONS and not u.person:
         return Understanding(action="unclear", ask=GENERIC_ASK["person"][language])
     if u.action == "edit_apartment" and not u.person:
@@ -142,12 +148,14 @@ def settle(understanding: Understanding, language: str) -> Understanding:
     return u
 
 
-def interpret(texts: list[str], language: str) -> Interpretation:
-    """One provider call. texts = [request] or [request, clarification answer]."""
+def interpret(texts: list[str], language: str, earlier_person: Optional[str] = None) -> Interpretation:
+    """One provider call. texts = [request] or [request, clarification answer].
+    `earlier_person`: the name the previous request searched for, so "create the contact" or
+    "add a visit to him" needs no name again."""
     provider = generation.provider_name()
     try:
-        reply = _call_provider(provider, build_input(texts, language))
-        understanding = settle(parse_reply(reply), language)
+        reply = _call_provider(provider, build_input(texts, language, earlier_person))
+        understanding = settle(parse_reply(reply), language, earlier_person)
     except _Failed as e:
         return _failed(str(e))
     except ValueError as e:  # includes json.JSONDecodeError

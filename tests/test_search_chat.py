@@ -97,7 +97,8 @@ def test_results_count_first_then_people_and_apartments_with_ids(client, fake_cr
     assert reply[5] == "- Herzl 10, Tel Aviv, apartment 3, floor 1 - Cohen"  # never the internal id
     assert [(c["action"], c["id"], c["group"]) for c in data["choices"]] == [
         ("open_person", 5, "people"), ("open_person", 6, "people"), ("open_apartment", 35852, "apartments")]
-    assert data["search_state"] == {"offer_add": False, "language": "en", "add_text": None, "clarify": None}
+    assert data["search_state"] == {"offer_add": False, "language": "en", "add_text": None, "clarify": None,
+                                   "last_person": "Cohen"}
 
 
 @pytest.mark.parametrize("people, apartments, expected", [

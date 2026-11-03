@@ -80,6 +80,8 @@ class SearchState(BaseModel):
     add_text: Optional[str] = Field(default=None, max_length=MAX_CARRIED_TEXT)
     # A request the interpreter found unclear: the next message is its clarification answer.
     clarify: Optional[str] = Field(default=None, max_length=MAX_CARRIED_TEXT)
+    # The person the last request searched for: "create the contact" / "add a visit to him" next.
+    last_person: Optional[str] = Field(default=None, max_length=200)
 
 
 MESSAGES = {
@@ -107,6 +109,10 @@ MESSAGES = {
         "change_pick": "Choose the record you want to change:",
         "person_pick": "Choose the person:",
         "no_person": "I found no person you can access for \"{query}\".",
+        "no_person_add": "I found no person you can access for \"{query}\". "
+                         "Do you want to add \"{query}\" as a new person?",
+        "visit_after_approval": "(A new person is saved as a draft; a visit can be recorded once the contact "
+                                "is approved in the CRM.)",
         "no_apartment": "I found no apartment you can access for \"{query}\".",
         "too_long": "That's too long for one request - please keep it under {limit} characters.",
         "not_understood": "Sorry, I couldn't understand that request. Nothing was searched or changed. "
@@ -150,6 +156,9 @@ MESSAGES = {
         "change_pick": "בחרו את הרשומה שתרצו לשנות:",
         "person_pick": "בחרו את האדם:",
         "no_person": "לא מצאתי אדם שיש לכם גישה אליו עבור \"{query}\".",
+        "no_person_add": "לא מצאתי אדם שיש לכם גישה אליו עבור \"{query}\". "
+                         "האם להוסיף את \"{query}\" כאדם חדש?",
+        "visit_after_approval": "(אדם חדש נשמר כטיוטה; אפשר לרשום ביקור אחרי שאיש הקשר יאושר ב-CRM.)",
         "no_apartment": "לא מצאתי דירה שיש לכם גישה אליה עבור \"{query}\".",
         "too_long": "זה ארוך מדי לבקשה אחת - כתבו בבקשה עד {limit} תווים.",
         "not_understood": "סליחה, לא הצלחתי להבין את הבקשה. לא חיפשתי ולא שיניתי דבר. "
@@ -269,15 +278,15 @@ def handle_turn(token: str, message: str, state: SearchState, role: Optional[str
     if state.clarify is not None:
         # The answer to the clarifying question: one more interpretation, never a third.
         original, state.clarify = state.clarify, None
-        result = interpreter.interpret([original, text], lang)
+        result = interpreter.interpret([original, text], lang, state.last_person)
         if result.status != "ok" or result.understanding.action == "unclear":
             return _answer(state, "not_understood", say(lang, "clarify_failed"))
-        return _route(token, lang, role, result.understanding, f"{original}\n{text}", ask)
+        return _route(token, lang, role, result.understanding, f"{original}\n{text}", ask, state.last_person)
 
     if len(text) < crm_api.MIN_SEARCH_LENGTH:
         return _answer(state, "too_short", say(lang, "too_short"))
 
-    result = interpreter.interpret([text], lang)
+    result = interpreter.interpret([text], lang, state.last_person)
     if result.status != "ok":
         # Never a fallback: the sentence is not searched and nothing is started from it.
         return _answer(state, "not_understood", say(lang, "not_understood"))
@@ -285,13 +294,13 @@ def handle_turn(token: str, message: str, state: SearchState, role: Optional[str
     if understanding.action == "unclear":
         state.clarify = text
         return _answer(state, "clarify", understanding.ask)
-    return _route(token, lang, role, understanding, text, ask)
+    return _route(token, lang, role, understanding, text, ask, state.last_person)
 
 
 def _route(token: str, lang: str, role: Optional[str], u: interpreter.Understanding, text: str,
-           ask: Callable[[str], dict]) -> dict:
+           ask: Callable[[str], dict], last_person: Optional[str] = None) -> dict:
     """A clear understanding -> the existing flow. `text` is what the user wrote."""
-    state = SearchState(language=lang)
+    state = SearchState(language=lang, last_person=last_person)
     if u.action == "ask_question":
         return ask(u.question or text)
     if u.action in ("edit_contact", "add_visit") and not may_see_people(role):
@@ -307,19 +316,31 @@ def _route(token: str, lang: str, role: Optional[str], u: interpreter.Understand
         return _failure(state, body)
     people = body["people"]
     apartments = [Apartment(**a) for a in body["apartments"]]
+    if u.action != "edit_apartment":
+        state.last_person = query[:200]
     can_add = may_see_people(role) and body["can_add_person"] is True
 
     if u.action == "create_contact":
         if not can_add:
             return _answer(state, "add_not_allowed", say(lang, "add_not_allowed"))
+        # The add flow reads the details from the user's words; a name remembered from the
+        # previous request ("create the contact") isn't in them, so it goes first.
+        add_text = text if u.person and u.person.lower() in text.lower() else f"{u.person}\n{text}"
         if not people:
-            return _with_intro(start_add(token, lang, role, text), say(lang, "add_start", name=query))
+            return _with_intro(start_add(token, lang, role, add_text), say(lang, "add_start", name=query))
         head = [say(lang, "add_check", name=query), count_line(lang, len(people), 0)]
-        return _results(state, lang, head, people, [], body, add=_add_choice(say(lang, "add_anyway"), text))
+        return _results(state, lang, head, people, [], body, add=_add_choice(say(lang, "add_anyway"), add_text))
 
     if u.action in ("edit_contact", "add_visit"):
         if not people:
-            return _answer(state, "no_match", say(lang, "no_person", query=query))
+            if not can_add:
+                return _answer(state, "no_match", say(lang, "no_person", query=query))
+            # Offer to add them with the name already known; a draft can't get a visit yet - said plainly.
+            state.offer_add, state.add_text = True, query
+            reply = say(lang, "no_person_add", query=query)
+            if u.action == "add_visit":
+                reply += "\n" + say(lang, "visit_after_approval")
+            return _answer(state, "no_match", reply, choices=_yes_no(lang, query))
         if len(people) == 1 and as_written:
             # The user's own words go on: the flow matches them against the CRM's fields.
             answer = person_chat.open_person(
