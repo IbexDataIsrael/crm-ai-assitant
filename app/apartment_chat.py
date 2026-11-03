@@ -356,8 +356,9 @@ def place(lang: str, apt: Apartment) -> str:
 
 
 def field_label(field: EditableField) -> str:
-    """The CRM's one label, in the user's language; the key only if the CRM sent none."""
-    return field.label or field.field_key
+    """The CRM's one label, in the user's language; the key only if the CRM sent none. A trailing
+    colon in the CRM's label is dropped (the chat adds its own: "Jewish Name: ...")."""
+    return (field.label or "").strip().rstrip(":").strip() or field.field_key
 
 
 def option_label(option: Option) -> str:

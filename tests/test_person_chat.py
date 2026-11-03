@@ -51,7 +51,7 @@ V_CANDLES = {"field_key": "customfield.visit.candles", "label": "Shabbat candles
 V_TZEDAKA = {"field_key": "customfield.visit.tzedaka", "label": "Tzedaka", "kind": "yes_no", "default": False}
 V_NOTES = {"field_key": "visits.notes", "label": "Notes", "kind": "text"}
 V_LOG = {"field_key": "visits.interactions", "label": "Interactions", "kind": "entries", "default": [],
-         "options": [{"value": "call", "label": "Call"}]}
+         "options": [{"value": "call", "label": "Call"}, {"value": "mezuza", "label": "Mezuza check"}]}
 VISIT_FIELDS = [V_DATE, V_TYPE, V_LOCATION, V_TORAH, V_TEFILLIN, V_REBBE, V_CANDLES, V_TZEDAKA, V_NOTES, V_LOG]
 OLD_VISIT = {"visit_id": 301, "visit_date": "2026-10-20", "visit_type": "Home visit",
              "done": ["Tefillin", "Torah thought: Given"], "notes": None}
@@ -151,8 +151,10 @@ def test_open_reads_the_contact_and_offers_edit_or_visit(client, fake_crm, monke
     assert request.method == "GET" and request.url.path == CONTACT_PATH
     assert request.headers["authorization"] == f"Bearer {TOKEN}"
     assert data["intent"] == "person" and data["outcome"] == "menu"
-    assert data["reply"].startswith("Yosef Cohen\n- First name: Yosef\n- Last name: Cohen\n- Email: -")
-    assert "- Status: New" in data["reply"] and "- Keeps Shabbat: No" in data["reply"]
+    # Filled fields only, then how many are empty (the edit list shows them all).
+    assert data["reply"].startswith("Yosef Cohen\n- First name: Yosef\n- Last name: Cohen\n- Status: New")
+    assert "- Keeps Shabbat: No" in data["reply"] and "Email" not in data["reply"]
+    assert '(1 more field is empty - choose "Edit a field" to fill it.)' in data["reply"]
     assert "Recent visits:\n- 2026-10-20 - Home visit: Tefillin, Torah thought: Given" in data["reply"]
     assert data["choices"] == [{"label": "Edit a field", "message": "[edit]"},
                                {"label": "Record a visit", "message": "[visit]"}]
@@ -362,29 +364,35 @@ def test_a_full_visit_one_confirm_one_call(client, fake_crm):
     q = start_visit(client, fake_crm)
     assert q["outcome"] == "visit" and "Recording a visit for Yosef Cohen" in q["reply"]
     assert "Date - choose \"Today (2026-11-02)\"" in q["reply"]
-    assert q["choices"][0] == {"label": "Today (2026-11-02)", "message": "[default]"}
+    # The first question has no "done" button: a visit is never saved with nothing but a date by one tap.
+    assert q["choices"] == [{"label": "Today (2026-11-02)", "message": "[default]"}]
     q = step(client, fake_crm, q["state"], "[default]")
+    # Then what was done: every yes/no field (the mitzvot) at once ...
+    assert q["multi"] is True and "What was done?" in q["reply"]
+    assert [c["label"] for c in q["choices"]] == ["1. Tefillin", "2. Shabbat candles", "3. Tzedaka"]
+    assert q["clear"] == {"label": "None of these", "message": "[skip]"}
+    q = step(client, fake_crm, q["state"], "1,2")
+    # ... and the interactions, from the CRM's own categories.
+    assert q["multi"] is True and q["prompt"].startswith("Interactions - what happened during the visit?")
+    assert [(c["label"], c["checked"]) for c in q["choices"]] == [("1. Call", False), ("2. Mezuza check", False)]
+    q = step(client, fake_crm, q["state"], "2")
     assert q["prompt"].startswith("Visit type:") and [c["message"] for c in q["choices"]] == ["1", "2", "[skip]",
                                                                                                "[finish]"]
+    assert q["choices"][-1]["label"] == "Done - review the visit"
     q = step(client, fake_crm, q["state"], "1")
     assert "Location - type it, or skip" in q["reply"]
     q = step(client, fake_crm, q["state"], "[skip]")
     assert q["prompt"].startswith("Torah thought:")
     q = step(client, fake_crm, q["state"], "Given")
-    # Every yes/no field (the mitzvot) at once, where the first one is in the CRM's list.
-    assert q["multi"] is True and "What was done?" in q["reply"]
-    assert [c["label"] for c in q["choices"]] == ["1. Tefillin", "2. Shabbat candles", "3. Tzedaka"]
-    assert q["clear"] == {"label": "None of these", "message": "[skip]"}
-    q = step(client, fake_crm, q["state"], "1,2")
     assert "Connection to the Rebbe - type it" in q["reply"]
     q = step(client, fake_crm, q["state"], "Learning Tanya weekly")
     assert "Notes - type it" in q["reply"]
     confirm = step(client, fake_crm, q["state"], "Warm visit")
-    # The interactions log (entries) is not asked in this phase.
     assert confirm["outcome"] == "visit_confirm"
     assert confirm["reply"] == (
         "Record a visit for Yosef Cohen:\n- Date: 2026-11-02\n- Visit type: Home visit\n- Torah thought: Given\n"
         "- Tefillin ✓\n- Connection to the Rebbe: Learning Tanya weekly\n- Shabbat candles ✓\n- Notes: Warm visit"
+        "\n- Interactions: Mezuza check"
         "\n\nReply \"yes\" to save this visit, or \"no\" to cancel.")
     assert posts(fake_crm) == []
     fake_crm.answers += [ok(contact()), created(), ok(contact())]
@@ -394,7 +402,8 @@ def test_a_full_visit_one_confirm_one_call(client, fake_crm):
     assert body_of(post) == {"values": {
         "visits.visit_date": "2026-11-02", "visits.visit_type": "home", "visits.torah_thought": "given",
         "customfield.visit.tefillin": True, "customfield.visit.rebbe": "Learning Tanya weekly",
-        "customfield.visit.candles": True, "visits.notes": "Warm visit"}}
+        "customfield.visit.candles": True, "visits.notes": "Warm visit",
+        "visits.interactions": [{"category": "mezuza", "note": ""}]}}
     assert saved["outcome"] == "visit_created"
     assert saved["reply"].startswith(
         "Saved. The CRM recorded the visit: 2026-11-02, Home visit, Tefillin, Shabbat candles.")

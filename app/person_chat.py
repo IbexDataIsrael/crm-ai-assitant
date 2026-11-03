@@ -21,9 +21,11 @@ they all come from the CRM, in the user's language.
   to tick. Every question but the date can be skipped, and "Finish" goes to
   the confirm screen at any point. ONE confirm screen lists every value, then
   ONE call saves the whole visit. The date is always sent (the CRM's default,
-  today, unless another was typed). The interactions log (`entries`) is not
-  asked in this phase. A draft contact (`can_add_visit` false) is not offered
-  a visit.
+  today, unless another was typed). The interactions (`entries`: what happened,
+  each a category from the CRM's list) are ticked like the yes/no fields and
+  sent as [{category, note: ""}]. Order (a labelled choice): the date, then
+  what was done (yes/no fields, interactions), then the rest in the CRM's
+  order. A draft contact (`can_add_visit` false) is not offered a visit.
 
 From an understood request (docs/instructions21.md, app/search_chat.py): the
 user's own words are matched against the CRM's labels and options here
@@ -39,9 +41,9 @@ same request_id with the same body, which the CRM answers from its record
 """
 
 import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr
 
 from app import apartment_chat, crm_api
 from app.apartment_chat import (CLEAR_MESSAGE, EditableField, Value, field_label, field_lines, fingerprint,
@@ -55,7 +57,7 @@ Step = Literal["menu", "choose_field", "choose_value", "confirm", "blocked",
                "visit", "visit_confirm", "visit_blocked"]
 EDIT_KINDS = ("single_option", "text", "number", "date", "yes_no")
 CLEARABLE = ("text", "number", "date")
-VISIT_KINDS = ("date", "single_option", "text", "number", "yes_no")
+VISIT_KINDS = ("date", "single_option", "text", "number", "yes_no", "entries")
 # The step of the visit questions that asks every yes/no field at once.
 YES_NO_STEP = "[yes_no]"
 # Sent only by the page's buttons.
@@ -66,6 +68,10 @@ FINISH_MESSAGE = "[finish]"
 DEFAULT_MESSAGE = "[default]"
 # A visit date written as these words is the CRM's default date (today).
 TODAY_WORDS = ("today", "היום")
+
+
+# A visit value: a field's value, or the interactions [{category, note}] (category = an option's value).
+VisitValue = Union[Value, list[dict[StrictStr, Union[StrictStr, StrictInt]]]]
 
 
 class VisitField(BaseModel):
@@ -125,11 +131,11 @@ class VisitDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     position: int = 0
-    values: dict[str, Value] = Field(default_factory=dict)
+    values: dict[str, VisitValue] = Field(default_factory=dict)
     # A fingerprint of the visit form the questions were built from.
     shown: Optional[str] = None
     # Once sent: the exact body's values and its request_id, resent unchanged after a lost answer.
-    sent: Optional[dict[str, Value]] = None
+    sent: Optional[dict[str, VisitValue]] = None
     request_id: Optional[str] = None
     # Answers taken from the user's own request: their questions are not asked again.
     prefilled: list[str] = Field(default_factory=list)
@@ -183,7 +189,13 @@ MESSAGES = {
                         "(Save with nothing ticked = none of these).",
         "none_ticked": "None of these",
         "skip": "Skip",
-        "finish": "Finish",
+        "finish": "Done - review the visit",
+        "visit_entries": "{label} - what happened during the visit? Tick everything and press Save "
+                         "(Save with nothing ticked = none).",
+        "empty_fields": "({n} more fields are empty - choose \"Edit a field\" to fill them.)",
+        "empty_field": "(1 more field is empty - choose \"Edit a field\" to fill it.)",
+        "field_is_detail": "\"{words}\" is a detail of the person, not part of a visit, so here it is to change:",
+        "field_is_visit": "\"{words}\" is recorded with a visit, so here is a new visit:",
         "visit_changed": "The visit form changed in the CRM meanwhile, so I started the questions again. "
                          "Nothing was saved.",
         "visit_confirm": "Record a visit for {name}:\n{lines}\n\nReply \"yes\" to save this visit, or \"no\" to cancel.",
@@ -235,7 +247,12 @@ MESSAGES = {
         "visit_yes_no": "מה נעשה? סמנו את כל מה שנעשה ולחצו על שמירה (שמירה בלי סימון = אף אחד מאלה).",
         "none_ticked": "אף אחד מאלה",
         "skip": "דילוג",
-        "finish": "סיום",
+        "finish": "סיימתי - לסיכום הביקור",
+        "visit_entries": "{label} - מה היה בביקור? סמנו את כל מה שהיה ולחצו על שמירה (שמירה בלי סימון = כלום).",
+        "empty_fields": "(עוד {n} שדות ריקים - בחרו \"עריכת שדה\" כדי למלא אותם.)",
+        "empty_field": "(עוד שדה אחד ריק - בחרו \"עריכת שדה\" כדי למלא אותו.)",
+        "field_is_detail": "\"{words}\" הוא פרט של האדם ולא חלק מביקור, אז הנה הוא לשינוי:",
+        "field_is_visit": "\"{words}\" נרשם עם ביקור, אז הנה ביקור חדש:",
         "visit_changed": "טופס הביקור השתנה ב-CRM בינתיים, ולכן התחלתי את השאלות מחדש. לא נשמר דבר.",
         "visit_confirm": "רישום ביקור אצל {name}:\n{lines}\n\nהשיבו \"כן\" כדי לשמור את הביקור, או \"לא\" כדי לבטל.",
         "visit_confirm_wait": "השיבו \"כן\" כדי לשמור בדיוק את הביקור הזה, או \"לא\" כדי לבטל.",
@@ -284,7 +301,11 @@ def contact_text(lang: str, contact: Contact) -> str:
     head = person_name(lang, contact)
     if contact.status_label:
         head += f" [{contact.status_label}]"
-    lines = [head, *field_lines(lang, contact.fields)]
+    filled = [f for f in contact.fields if not apartment_chat._is_empty(f.current_value)]
+    lines = [head, *field_lines(lang, filled)]
+    empty = len(contact.fields) - len(filled)
+    if empty:
+        lines.append(say(lang, "empty_field") if empty == 1 else say(lang, "empty_fields", n=empty))
     lines.append(say(lang, "recent_visits"))
     if contact.recent_visits:
         lines += [visit_line(lang, v) for v in contact.recent_visits]
@@ -307,15 +328,14 @@ def _visit_fingerprint(contact: Contact) -> str:
 
 
 def visit_steps(contact: Contact) -> list[str]:
-    """The visit questions: one per field, the yes/no fields together where the first one is."""
-    steps = []
-    for f in contact.visit_fields:
-        if f.kind == "yes_no":
-            if YES_NO_STEP not in steps:
-                steps.append(YES_NO_STEP)
-        else:
-            steps.append(f.field_key)
-    return steps
+    """The visit questions: the visit date first, then what was done (every yes/no field together
+    as one step, the interactions), then the other fields in the CRM's order."""
+    fields = contact.visit_fields
+    head = [f.field_key for f in fields[:1] if f.kind == "date"]
+    done = ([YES_NO_STEP] if any(f.kind == "yes_no" for f in fields) else []) + \
+        [f.field_key for f in fields if f.kind == "entries"]
+    rest = [f.field_key for f in fields if f.field_key not in head and f.kind not in ("yes_no", "entries")]
+    return head + done + rest
 
 
 # --- one turn ------------------------------------------------------------------
@@ -358,21 +378,43 @@ def open_person(token: str, language: str, contact_id: int, *, edit: bool = Fals
     if failure:
         return failure
     intro = contact_text(language, contact)
+    # Code decides with the CRM's own lists, whatever the model guessed: a named item that is
+    # only a detail of the person is edited; one that only a visit records starts a visit.
+    note = ""
+    if field_words and contact.can_add_visit:
+        in_visit = _names_visit_item(contact, field_words)
+        in_person = plan_edit(language, contact.fields, field_words, None)[0] is not None
+        if visit and in_person and not in_visit:
+            visit, edit, note = False, True, say(language, "field_is_detail", words=field_words)
+        elif edit and in_visit and not in_person:
+            visit, edit, note = True, False, say(language, "field_is_visit", words=field_words)
     if visit and contact.can_add_visit:
         state.visit = VisitDraft(shown=_visit_fingerprint(contact))
         noted = _prefill_visit(language, contact, state.visit, field_words, value_words, date_words, notes)
-        start = say(language, "visit_start", name=person_name(language, contact))
+        start = (note + "\n" if note else "") + say(language, "visit_start", name=person_name(language, contact))
         if noted:
             start += "\n" + say(language, "from_message", items=", ".join(noted))
         return _ask_visit(state, contact, intro=start)
     if not edit:
         return _menu(state, contact, intro=intro)  # also a visit for a draft: the menu says why not
+    if note:
+        intro += "\n\n" + note
     field, understood, value, prefix = plan_edit(language, contact.fields, field_words, value_words)
     if field is None:
         return _ask_field(state, contact, prefix=prefix, intro=intro)
     if not understood:
         return _ask_value(state, contact, field, prefix=prefix, intro=intro)
     return _confirm_screen(state, contact, field, value, intro=intro)
+
+
+def _names_visit_item(contact: Contact, words: str) -> bool:
+    """Whether the words name something a visit records: a yes/no visit field or an interaction category."""
+    for f in contact.visit_fields:
+        if f.kind == "yes_no" and match_words(words, [field_label(f)]):
+            return True
+        if f.kind == "entries" and match_words(words, [apartment_chat.option_label(o) for o in f.options]):
+            return True
+    return False
 
 
 def _prefill_visit(lang: str, contact: Contact, visit: VisitDraft, field_words: Optional[str],
@@ -389,6 +431,13 @@ def _prefill_visit(lang: str, contact: Contact, visit: VisitDraft, field_words: 
             if any(match_words(t, [label]) for t in said):
                 visit.values[f.field_key] = True
                 noted.append(f"{label} {say(lang, 'done_mark')}")
+            continue
+        if f.kind == "entries":
+            # Each category the user named is pre-ticked; the question is still shown to confirm or add.
+            named = [o for o in f.options if any(match_words(t, [apartment_chat.option_label(o)]) for t in said)]
+            if named:
+                visit.values[f.field_key] = [{"category": o.value, "note": ""} for o in named]
+                noted += [f"{apartment_chat.option_label(o)} {say(lang, 'done_mark')}" for o in named]
             continue
         if f.kind == "date" and date_words:
             if date_words.strip().casefold() in TODAY_WORDS and isinstance(f.default, str):
@@ -613,14 +662,23 @@ def _ask_visit(state: PersonState, contact: Contact, prefix: str = "", intro: st
                        multi=True, clear={"label": say(lang, "none_ticked"), "message": SKIP_MESSAGE})
     field = _visit_field(contact, step)
     label = field_label(field)
+    if field.kind == "entries":
+        picked = {e.get("category") for e in state.visit.values.get(field.field_key) or [] if isinstance(e, dict)}
+        lines = numbered([apartment_chat.option_label(o) for o in field.options])
+        ticked = [o.value in picked for o in field.options]
+        items = [line + (" " + say(lang, "done_mark") if t else "") for line, t in zip(lines, ticked)]
+        choices = [{"label": line, "message": str(i), "checked": t} for i, (line, t) in enumerate(zip(lines, ticked), 1)]
+        return _answer(state, "visit", pre + say(lang, "visit_entries", label=label), intro=intro, items=items,
+                       choices=choices, multi=True, clear={"label": say(lang, "none_ticked"), "message": SKIP_MESSAGE})
     if field.kind == "date":
+        # The first question: no "done" button here (it would save a visit with nothing but a date).
         default = field.default if isinstance(field.default, str) else None
         if default:
             question = say(lang, "visit_date", label=label, default=default)
-            choices = [{"label": say(lang, "today", default=default), "message": DEFAULT_MESSAGE}, finish]
+            choices = [{"label": say(lang, "today", default=default), "message": DEFAULT_MESSAGE}]
         else:
             question = say(lang, "visit_date_no_default", label=label)
-            choices = [finish] if not field.required else []
+            choices = [skip] if not field.required else []
         return _answer(state, "visit", pre + question, intro=intro, choices=choices)
     if field.kind == "single_option":
         items = numbered([apartment_chat.option_label(o) for o in field.options])
@@ -670,7 +728,15 @@ def _visit_turn(state: PersonState, contact: Contact, text: str) -> dict:
         visit.position += 1
         return _ask_visit(state, contact)
     field = _visit_field(contact, step)
-    if field.kind == "date":
+    if field.kind == "entries":
+        picked = []
+        for part in text.replace("،", ",").split(","):
+            index = pick_index(part.strip(), len(field.options))
+            if index is None:
+                return _ask_visit(state, contact, prefix=say(lang, "pick_number"))
+            picked.append(field.options[index].value)
+        visit.values[field.field_key] = [{"category": value, "note": ""} for value in dict.fromkeys(picked)]
+    elif field.kind == "date":
         if text == DEFAULT_MESSAGE and isinstance(field.default, str):
             visit.values[field.field_key] = field.default
         else:
@@ -709,6 +775,8 @@ def _visit_values(contact: Contact, visit: VisitDraft) -> dict:
     values = {}
     for f in contact.visit_fields:
         if f.field_key in visit.values:
+            if f.kind == "entries" and not visit.values[f.field_key]:
+                continue  # nothing ticked: no interactions are sent
             values[f.field_key] = visit.values[f.field_key]
         elif f.kind == "date" and isinstance(f.default, str):
             values[f.field_key] = f.default
@@ -725,6 +793,10 @@ def _visit_confirm(state: PersonState, contact: Contact, intro: str = "") -> dic
             continue
         if f.kind == "yes_no":
             lines.append(f"- {field_label(f)} {say(lang, 'done_mark')}")
+        elif f.kind == "entries":
+            names = {o.value: apartment_chat.option_label(o) for o in f.options}
+            lines.append(f"- {field_label(f)}: " + ", ".join(str(names.get(e["category"], e["category"]))
+                                                            for e in values[f.field_key]))
         else:
             lines.append(f"- {field_label(f)}: {value_text(lang, f, values[f.field_key])}")
     reply = say(lang, "visit_confirm", name=person_name(lang, contact), lines="\n".join(lines))

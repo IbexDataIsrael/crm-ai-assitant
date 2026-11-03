@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from app import interpreter
 from app.main import app
 from tests.test_apartment_chat import ACTIVIST_FIELDS, AUTH, TOKEN, apt, ok
-from tests.test_person_chat import VISIT_FIELDS, contact
+from tests.test_person_chat import FIELDS, V_DATE, V_LOG, V_NOTES, VISIT_FIELDS, contact
 from tests.test_search_chat import as_role, found, person, searched
 
 TEFILLIN = "להוסיף תפילין לג'ון"
@@ -359,7 +359,7 @@ def test_a_visit_starts_with_what_the_user_said_ticked_and_shown(client, fake_cr
         "notes": "he also lit Shabbat candles"})
     assert data["outcome"] == "visit"
     assert "From your message: Date: 2026-11-02, Tefillin ✓, Shabbat candles ✓." in data["reply"]
-    assert data["prompt"].splitlines()[-1].startswith("Visit type:")  # the date is not asked again
+    assert data["prompt"].splitlines()[-1].startswith("What was done?")  # the date is not asked again
     assert data["state"]["visit"]["prefilled"] == ["visits.visit_date"]
     assert {r.method for r in fake_crm.requests} == {"GET"}
 
@@ -374,11 +374,7 @@ def turn_person(client, message, state):
 def test_the_ticked_mitzvot_are_checked_on_the_page_and_reach_the_confirm_screen(client, fake_crm, fake_ai):
     data = understood_person(client, fake_crm, fake_ai, {"action": "add_visit", "person": "Yosef",
                                                          "field": "tefillin", "date": "today"})
-    fake_crm.answers += [ok(contact())] * 3
-    state = data["state"]
-    for message in ("1", "[skip]", "Given"):  # visit type, location, Torah thought
-        data = turn_person(client, message, state)
-        state = data["state"]
+    state = data["state"]  # the date came from the message: the first question is what was done
     assert data["multi"] is True
     assert [(c["label"], c["checked"]) for c in data["choices"]] == [
         ("1. Tefillin", True), ("2. Shabbat candles", False), ("3. Tzedaka", False)]
@@ -439,3 +435,65 @@ def test_when_the_new_contact_cannot_be_opened_the_save_is_still_reported(client
         "intent": "create_contact", "message": "yes", "state": shown_proposal_state(DANA)}).json()
     assert data["intent"] == "create_contact" and data["outcome"] == "created"
     assert data["reply"].startswith("Saved as a draft contact (#42):")
+
+# --- code decides between a visit and a detail of the person (live test, 3 Nov) ---------------
+
+MEZUZA = {"field_key": "customfield.contact_mekurav.mezuza", "label": "Mezuza", "kind": "text", "current_value": None}
+JEWISH_NAME = {"field_key": "customfield.contact_mekurav.jewish_name", "label": "Jewish Name:", "kind": "text",
+               "current_value": "Tzvi"}
+
+
+def test_add_mezuza_to_zvi_edits_the_persons_mezuza_when_visits_dont_record_it(client, fake_crm, fake_ai):
+    """The live case: the model said add_visit, but in this CRM Mezuza is only a contact field."""
+    calls_only = {**V_LOG, "options": [{"value": "call", "label": "Call"}]}  # no mezuza among the interactions
+    view = contact(fields=FIELDS + [MEZUZA], visit_fields=[V_DATE, V_NOTES, calls_only])
+    data = understood_person(client, fake_crm, fake_ai, {"action": "add_visit", "person": "zvi", "field": "mezuza"},
+                             view=view)
+    assert data["outcome"] == "choose_value" and data["state"]["field_key"] == MEZUZA["field_key"]
+    assert '"mezuza" is a detail of the person, not part of a visit, so here it is to change:' in data["reply"]
+    assert data["state"]["visit"] is None
+
+
+def test_a_visit_item_named_as_an_edit_starts_a_visit_with_it_ticked(client, fake_crm, fake_ai):
+    data = understood_person(client, fake_crm, fake_ai, {"action": "edit_contact", "person": "zvi",
+                                                         "field": "mezuza check"})
+    assert data["outcome"] == "visit"
+    assert '"mezuza check" is recorded with a visit, so here is a new visit:' in data["reply"]
+    assert "From your message: Mezuza check ✓." in data["reply"]
+
+
+def test_an_item_both_lists_have_follows_the_models_reading(client, fake_crm, fake_ai):
+    tefillin = {"field_key": "customfield.contact_mekurav.tefillin", "label": "Tefillin", "kind": "text",
+                "current_value": None}
+    data = understood_person(client, fake_crm, fake_ai, {"action": "add_visit", "person": "zvi", "field": "tefillin"},
+                             view=contact(fields=FIELDS + [tefillin]))
+    assert data["outcome"] == "visit" and "Tefillin ✓" in data["reply"]
+
+
+def test_named_interactions_are_pre_ticked_and_sent(client, fake_crm, fake_ai):
+    data = understood_person(client, fake_crm, fake_ai, {"action": "add_visit", "person": "zvi",
+                                                         "notes": "we did the mezuza check", "date": "today"},
+                             view=contact(visit_fields=[V_DATE, V_LOG, V_NOTES]))
+    assert data["prompt"].splitlines()[-1].startswith("Interactions - what happened")
+    assert [(c["label"], c["checked"]) for c in data["choices"]] == [("1. Call", False), ("2. Mezuza check", True)]
+    assert "2. Mezuza check ✓" in data["reply"]
+    view = contact(visit_fields=[V_DATE, V_LOG, V_NOTES])
+    fake_crm.answers += [ok(view), ok(view), ok(view)]
+    q = turn_person(client, "2", data["state"])          # keeps the tick (the page sends the ticked ones)
+    confirm = turn_person(client, "[finish]", q["state"])
+    assert "- Interactions: Mezuza check" in confirm["reply"]
+    fake_crm.answers += [httpx.Response(201, json={"status": "created", "replayed": False, "visit_id": 9,
+                                                   "contact_id": 12, "visit": None}), ok(view)]
+    turn_person(client, "yes", confirm["state"])
+    (post,) = [r for r in fake_crm.requests if r.method == "POST"]
+    sent = json.loads(post.content)["values"]
+    assert sent == {"visits.visit_date": "2026-11-02", "visits.interactions": [{"category": "mezuza", "note": ""}]}
+
+
+def test_a_label_ending_in_a_colon_is_shown_once(client, fake_crm, fake_ai):
+    data = understood_person(client, fake_crm, fake_ai, {"action": "edit_contact", "person": "zvi"},
+                             view=contact(fields=[NAME_ONLY, JEWISH_NAME]))
+    assert "- Jewish Name: Tzvi" in data["reply"] and "Jewish Name::" not in data["reply"]
+
+
+NAME_ONLY = {"field_key": "contacts.name", "label": "First name", "kind": "text", "current_value": "Zvi"}
