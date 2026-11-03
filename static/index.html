@@ -39,8 +39,6 @@
     .group-title { font-size: 16px; font-weight: bold; margin-top: 10px; }
     .crm-link { display: inline-block; margin-top: 6px; }
     .live { color: #8a4b00; font-weight: bold; }
-    .multi { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
-    .multi label { display: flex; gap: 8px; align-items: center; font-size: 18px; }
     /* Long lists (floors, report numbers): one per line, scrolling, with a filter box. */
     .long { flex-direction: column; flex-wrap: nowrap; align-items: stretch; max-height: 320px; overflow-y: auto; }
     .long button { text-align: start; }
@@ -108,7 +106,6 @@
         apartments_title: "Apartments",
         yes: "yes",
         no: "no",
-        save: "Save",
         filter: "Filter...",
         answer_title: "AI-generated answer ({provider}, {model})",
         answer_note: "Based only on the source passages below. Cited: {cited}",
@@ -160,7 +157,6 @@
         apartments_title: "דירות",
         yes: "כן",
         no: "לא",
-        save: "שמירה",
         filter: "סינון...",
         answer_title: "תשובה שנכתבה ב-AI ({provider}, {model})",
         answer_note: "מבוססת רק על קטעי המקור שלהלן. צוטטו: {cited}",
@@ -619,33 +615,8 @@
         });
         div.insertBefore(filter, box);
       }
-      if (data.multi && choices.length) {
-        const box = el("div", "multi apt-choices" + (long ? " long" : ""));
-        const boxes = choices.map(c => {
-          const label = el("label");
-          const check = document.createElement("input");
-          check.type = "checkbox";
-          check.value = c.message;
-          check.checked = !!c.checked;  // ticked already from the user's own request
-          label.append(check, document.createTextNode(c.label));
-          box.appendChild(label);
-          return check;
-        });
-        const save = el("button", null, t("save"));
-        save.type = "button";
-        save.addEventListener("click", () => {
-          const picked = boxes.filter(b => b.checked).map(b => b.value);
-          const labels = boxes.filter(b => b.checked).map(b => b.parentNode.textContent);
-          // Nothing ticked = clear the list, only through the server's clear button.
-          if (picked.length) tap(labels.join(", "), picked.join(","));
-          else if (data.clear) tap(data.clear.label, data.clear.message);
-        });
-        div.appendChild(box);
-        if (long) addFilter(box, boxes.map(b => b.parentNode));
-        const saveRow = el("div", "choices apt-choices");
-        saveRow.appendChild(save);
-        div.appendChild(saveRow);
-      } else if (choices.length) {
+      // A bot, not a form: every choice is a button (pick-several questions tick by taps on the server).
+      if (choices.length) {
         const row = el("div", "choices apt-choices" + (long ? " long" : ""));
         const buttons = choices.map(c => {
           const b = el("button", null, c.label);

@@ -62,6 +62,7 @@ CLEARABLE = ("multi_option", "text", "number", "date")
 
 # Sent only by the page's "Clear the value" button; empties a field (where the CRM allows it).
 CLEAR_MESSAGE = "[clear]"
+NEXT_MESSAGE = "[next]"  # "Continue" after tapping the values of a pick-several question
 DAY_FIRST_DATE = re.compile(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})")
 # Answers to a yes/no FIELD (not the confirm step).
 YES_VALUE_WORDS = {"yes", "y", "כן"}
@@ -153,6 +154,8 @@ class ApartmentEditState(BaseModel):
     # A fingerprint of the list the user was shown (fields, or the field's options).
     shown: Optional[str] = None
     pending: Optional[PendingChange] = None
+    # A multi-choice field being picked by taps: the option values ticked so far.
+    picked: Optional[list[StrictStr]] = None
 
 
 MESSAGES = {
@@ -172,8 +175,9 @@ MESSAGES = {
         "list_changed": "The apartment or the list of fields changed since it was shown, so I didn't use that "
                         "answer. Here is the current state:",
         "choose_single": "{label} - current value: {current}. Choose the new value:",
-        "choose_multi": "{label} - current: {current}. Choose one or more values, separated by commas "
-                        "(e.g. 1,3):",
+        "choose_multi": "{label} - current: {current}. Tap each value it should have (tap again to remove it), "
+                        "then \"Continue\":",
+        "continue": "Continue",
         "choose_yes_no": "{label} - current value: {current}. Yes or no?",
         "type_text": "{label} - current value: {current}. Type the new value:",
         "type_number": "{label} - current value: {current}. Type the new number:",
@@ -258,7 +262,8 @@ MESSAGES = {
         "no_fields_left": "אין בדירה הזו עוד שדה שאתם יכולים לערוך כאן.",
         "list_changed": "הדירה או רשימת השדות השתנו מאז שהוצגו, ולכן לא השתמשתי בתשובה. זה המצב הנוכחי:",
         "choose_single": "{label} - הערך הנוכחי: {current}. בחרו את הערך החדש:",
-        "choose_multi": "{label} - כרגע: {current}. בחרו ערך אחד או יותר, מופרדים בפסיקים (למשל 1,3):",
+        "choose_multi": "{label} - כרגע: {current}. הקישו על כל ערך שצריך להיות (הקשה נוספת מבטלת), ואז \"המשך\":",
+        "continue": "המשך",
         "choose_yes_no": "{label} - הערך הנוכחי: {current}. כן או לא?",
         "type_text": "{label} - הערך הנוכחי: {current}. כתבו את הערך החדש:",
         "type_number": "{label} - הערך הנוכחי: {current}. כתבו את המספר החדש:",
@@ -456,7 +461,7 @@ def _answer(state: ApartmentEditState, outcome: str, prompt: str, *, intro: str 
         "choices": choices if choices is not None else [
             {"label": line, "message": str(i)} for i, line in enumerate(lines, 1)],
         "multi": multi,
-        # The "Clear the value" button (also in `choices`, except for a multi list's Save with none ticked).
+        # The "Clear the value" button (also in `choices`).
         "clear": clear,
         "awaiting_check": state.step == "blocked",
         "logout": logout,
@@ -524,11 +529,20 @@ def handle_turn(token: str, message: str, state: ApartmentEditState) -> dict:
     field = next((f for f in apt.fields if f.field_key == state.field_key), None)
     if field is None or state.shown != _field_fingerprint(apt, field):
         return _ask_field(state, apt, intro=say(lang, "list_changed") + "\n" + apartment_text(lang, apt))
+    if field.kind == "multi_option" and state.picked is not None:
+        values = [str(o.value) for o in field.options]
+        if text == NEXT_MESSAGE:
+            return _confirm_screen(state, apt, field, [v for v in values if v in state.picked])
+        index = pick_index(text, len(values))
+        if index is not None:  # one tap: tick or untick, ask again
+            value = values[index]
+            state.picked = [v for v in values if (v in state.picked) != (v == value)]
+            return _ask_value(state, apt, field, keep_picked=True)
     understood, value, problem = pick_value(text, field, field.kind in CLEARABLE)
     if not understood:
         if is_explicit_no(text):
             return _cancel(state)
-        return _ask_value(state, apt, field, prefix=say(lang, problem))
+        return _ask_value(state, apt, field, prefix=say(lang, problem), keep_picked=True)
     return _confirm_screen(state, apt, field, value)
 
 
@@ -752,7 +766,7 @@ def _ask_field(state: ApartmentEditState, apt: Apartment, prefix: str = "", intr
 
 
 def _ask_value(state: ApartmentEditState, apt: Apartment, field: EditableField, prefix: str = "",
-               intro: str = "") -> dict:
+               intro: str = "", keep_picked: bool = False) -> dict:
     lang = state.language
     state.step = "choose_value"
     state.apartment_id, state.lineage_id = apt.apartment_id, apt.lineage_id
@@ -762,8 +776,25 @@ def _ask_value(state: ApartmentEditState, apt: Apartment, field: EditableField, 
     question, items, choices, clear = value_question(
         lang, field, value_text(lang, field, field.current_value), field.kind in CLEARABLE)
     prompt = (prefix + "\n" if prefix else "") + question
-    return _answer(state, "choose_value", prompt, intro=intro, items=items, choices=choices,
-                   multi=field.kind == "multi_option", clear=clear)
+    if field.kind != "multi_option":
+        state.picked = None
+        return _answer(state, "choose_value", prompt, intro=intro, items=items, choices=choices, clear=clear)
+    # Bot-style multi-choice: every value is a button; a tap ticks or unticks it and the question
+    # comes back with "✓" on the ticked ones; "Continue" goes to the confirm screen. It starts from
+    # the values the CRM has now. Typing "1,3" (a text channel) still sets exactly those.
+    values = [str(o.value) for o in field.options]
+    if not keep_picked or state.picked is None:
+        current = field.current_value if isinstance(field.current_value, list) else []
+        state.picked = [v for v in values if v in {str(c) for c in current}]
+    ticked = [v in state.picked for v in values]
+    labels = [option_label(o) for o in field.options]
+    items = [f"{i}. {label}" + (" ✓" if on else "") for i, (label, on) in enumerate(zip(labels, ticked), 1)]
+    choices = [{"label": ("✓ " if on else "") + label, "message": str(i)}
+               for i, (label, on) in enumerate(zip(labels, ticked), 1)]
+    choices.append({"label": say(lang, "continue"), "message": NEXT_MESSAGE})
+    if clear:
+        choices.append(clear)
+    return _answer(state, "choose_value", prompt, intro=intro, items=items, choices=choices, clear=clear)
 
 
 def _confirm_screen(state: ApartmentEditState, apt: Apartment, field: EditableField, value,
@@ -771,6 +802,7 @@ def _confirm_screen(state: ApartmentEditState, apt: Apartment, field: EditableFi
     lang = state.language
     label = field_label(field)
     state.step = "confirm"
+    state.picked = None
     state.pending = PendingChange(field_key=field.field_key, value=value, label=label,
                                   old_text=value_text(lang, field, field.current_value),
                                   new_text=value_text(lang, field, value))

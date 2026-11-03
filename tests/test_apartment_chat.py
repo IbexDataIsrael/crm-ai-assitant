@@ -256,9 +256,43 @@ def test_single_option_confirm_then_send_then_show_what_the_crm_returned(client,
     assert first != second
 
 
+def test_multi_option_is_tap_and_continue_buttons(client, fake_crm):
+    """A bot, not a website: each value is a button; a tap ticks or unticks it and the question
+    comes back; "Continue" goes to the confirm screen. It starts from the CRM's current values."""
+    field = LANGUAGES
+
+    def current():
+        return with_value(apt(), field["field_key"], ["russian"])
+
+    data = at_value(client, fake_crm, field, apartment=current())
+    assert data["multi"] is False
+    assert [c["label"] for c in data["choices"]] == ["Hebrew", "✓ Russian", "English", "Continue",
+                                                       "Clear the value"]
+    assert [c["message"] for c in data["choices"]][:4] == ["1", "2", "3", "[next]"]
+    assert "2. Russian ✓" in data["reply"]
+    fake_crm.answers.append(ok(current()))
+    tapped = turn(client, "1", data["state"])
+    assert tapped["outcome"] == "choose_value"
+    assert [c["label"] for c in tapped["choices"]][:3] == ["✓ Hebrew", "✓ Russian", "English"]
+    fake_crm.answers.append(ok(current()))
+    untapped = turn(client, "2", tapped["state"])
+    assert [c["label"] for c in untapped["choices"]][:3] == ["✓ Hebrew", "Russian", "English"]
+    fake_crm.answers.append(ok(current()))
+    wrong = turn(client, "banana", untapped["state"])  # a bad answer keeps what was ticked
+    assert [c["label"] for c in wrong["choices"]][:3] == ["✓ Hebrew", "Russian", "English"]
+    fake_crm.answers.append(ok(current()))
+    confirm = turn(client, "[next]", wrong["state"])
+    assert confirm["outcome"] == "confirm" and "from: Russian" in confirm["reply"]
+    assert "to: Hebrew" in confirm["reply"]
+    assert not any(p for p in posts(fake_crm))  # nothing sent before the yes
+    fake_crm.answers.append(answer(with_value(apt(21, 11), field["field_key"], ["hebrew"]), field["field_key"]))
+    turn(client, "yes", confirm["state"])
+    assert sent(posts(fake_crm)[-1]) == {"field_key": "apartment.language", "value": ["hebrew"]}
+
+
 def test_multi_option_takes_several_numbers_or_none(client, fake_crm):
     data = at_value(client, fake_crm, LANGUAGES)
-    assert data["multi"] is True and "separated by commas" in data["reply"]
+    assert data["multi"] is False and "Tap each value" in data["reply"]
     fake_crm.answers.append(ok(apt()))
     confirm = turn(client, "1, 3", data["state"])
     assert "to: Hebrew, English" in confirm["reply"]
@@ -269,7 +303,8 @@ def test_multi_option_takes_several_numbers_or_none(client, fake_crm):
     assert "Language: Hebrew, English" in saved["reply"]
     fake_crm.answers += [ok(apt(21, 11)), ok(apt(21, 11))]
     value = turn(client, "2", saved["state"])
-    assert value["clear"] == {"label": "Clear the value", "message": "[clear]"} and value["multi"]
+    assert value["clear"] == {"label": "Clear the value", "message": "[clear]"} and not value["multi"]
+    assert value["choices"][-1] == value["clear"]
     confirm = turn(client, value["clear"]["message"], value["state"])
     fake_crm.answers.append(answer(apt(22, 11), LANGUAGES["field_key"], previous=21))
     turn(client, "yes", confirm["state"])
