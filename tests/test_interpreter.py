@@ -371,13 +371,11 @@ def turn_person(client, message, state):
     return response.json()
 
 
-def test_the_ticked_mitzvot_are_checked_on_the_page_and_reach_the_confirm_screen(client, fake_crm, fake_ai):
+def test_the_mitzvot_from_the_message_come_ticked_and_reach_the_confirm_screen(client, fake_crm, fake_ai):
     data = understood_person(client, fake_crm, fake_ai, {"action": "add_visit", "person": "Yosef",
                                                          "field": "tefillin", "date": "today"})
     state = data["state"]  # the date came from the message: the first question is what was done
-    assert data["multi"] is True
-    assert [(c["label"], c["checked"]) for c in data["choices"]] == [
-        ("1. Tefillin", True), ("2. Shabbat candles", False), ("3. Tzedaka", False)]
+    assert [c["label"] for c in data["choices"]] == ["✓ Tefillin", "Shabbat candles", "Tzedaka", "Continue"]
     assert "1. Tefillin ✓" in data["reply"]  # for a text channel
     fake_crm.answers.append(ok(contact()))
     confirm = turn_person(client, "[finish]", state)
@@ -475,11 +473,11 @@ def test_named_interactions_are_pre_ticked_and_sent(client, fake_crm, fake_ai):
                                                          "notes": "we did the mezuza check", "date": "today"},
                              view=contact(visit_fields=[V_DATE, V_LOG, V_NOTES]))
     assert data["prompt"].splitlines()[-1].startswith("Interactions - what happened")
-    assert [(c["label"], c["checked"]) for c in data["choices"]] == [("1. Call", False), ("2. Mezuza check", True)]
+    assert [c["label"] for c in data["choices"]] == ["Call", "✓ Mezuza check", "Continue"]
     assert "2. Mezuza check ✓" in data["reply"]
     view = contact(visit_fields=[V_DATE, V_LOG, V_NOTES])
     fake_crm.answers += [ok(view), ok(view), ok(view)]
-    q = turn_person(client, "2", data["state"])          # keeps the tick (the page sends the ticked ones)
+    q = turn_person(client, "[next]", data["state"])      # Continue keeps the tick
     confirm = turn_person(client, "[finish]", q["state"])
     assert "- Interactions: Mezuza check" in confirm["reply"]
     fake_crm.answers += [httpx.Response(201, json={"status": "created", "replayed": False, "visit_id": 9,

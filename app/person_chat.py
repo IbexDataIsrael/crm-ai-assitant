@@ -64,6 +64,7 @@ YES_NO_STEP = "[yes_no]"
 EDIT_MESSAGE = "[edit]"
 VISIT_MESSAGE = "[visit]"
 SKIP_MESSAGE = "[skip]"
+NEXT_MESSAGE = "[next]"  # "Continue" after tapping the items of a pick-several question
 FINISH_MESSAGE = "[finish]"
 DEFAULT_MESSAGE = "[default]"
 # A visit date written as these words is the CRM's default date (today).
@@ -185,13 +186,13 @@ MESSAGES = {
         "visit_single": "{label}:",
         "visit_text": "{label} - type it, or skip:",
         "visit_number": "{label} - type a number, or skip:",
-        "visit_yes_no": "What was done? Tick everything that was done and press Save "
-                        "(Save with nothing ticked = none of these).",
+        "visit_yes_no": "What was done? Tap each one that was done (tap again to remove it), then \"Continue\".",
+        "continue": "Continue",
         "none_ticked": "None of these",
         "skip": "Skip",
         "finish": "Done - review the visit",
-        "visit_entries": "{label} - what happened during the visit? Tick everything and press Save "
-                         "(Save with nothing ticked = none).",
+        "visit_entries": "{label} - what happened during the visit? Tap each one (tap again to remove it), "
+                         "then \"Continue\".",
         "empty_fields": "({n} more fields are empty - choose \"Edit a field\" to fill them.)",
         "empty_field": "(1 more field is empty - choose \"Edit a field\" to fill it.)",
         "field_is_detail": "\"{words}\" is a detail of the person, not part of a visit, so here it is to change:",
@@ -244,11 +245,12 @@ MESSAGES = {
         "visit_single": "{label}:",
         "visit_text": "{label} - כתבו, או דלגו:",
         "visit_number": "{label} - כתבו מספר, או דלגו:",
-        "visit_yes_no": "מה נעשה? סמנו את כל מה שנעשה ולחצו על שמירה (שמירה בלי סימון = אף אחד מאלה).",
+        "visit_yes_no": "מה נעשה? הקישו על כל מה שנעשה (הקשה נוספת מבטלת), ואז \"המשך\".",
+        "continue": "המשך",
         "none_ticked": "אף אחד מאלה",
         "skip": "דילוג",
         "finish": "סיימתי - לסיכום הביקור",
-        "visit_entries": "{label} - מה היה בביקור? סמנו את כל מה שהיה ולחצו על שמירה (שמירה בלי סימון = כלום).",
+        "visit_entries": "{label} - מה היה בביקור? הקישו על כל מה שהיה (הקשה נוספת מבטלת), ואז \"המשך\".",
         "empty_fields": "(עוד {n} שדות ריקים - בחרו \"עריכת שדה\" כדי למלא אותם.)",
         "empty_field": "(עוד שדה אחד ריק - בחרו \"עריכת שדה\" כדי למלא אותו.)",
         "field_is_detail": "\"{words}\" הוא פרט של האדם ולא חלק מביקור, אז הנה הוא לשינוי:",
@@ -651,25 +653,10 @@ def _ask_visit(state: PersonState, contact: Contact, prefix: str = "", intro: st
     skip = {"label": say(lang, "skip"), "message": SKIP_MESSAGE}
     finish = {"label": say(lang, "finish"), "message": FINISH_MESSAGE}
     pre = prefix + "\n" if prefix else ""
-    if step == YES_NO_STEP:
-        boxes = [f for f in contact.visit_fields if f.kind == "yes_no"]
-        ticked = [state.visit.values.get(f.field_key) is True for f in boxes]
-        lines = numbered([field_label(f) for f in boxes])
-        # Ticked already (from the user's request): checked boxes on the page, a ✓ in the text.
-        items = [line + (" " + say(lang, "done_mark") if t else "") for line, t in zip(lines, ticked)]
-        choices = [{"label": line, "message": str(i), "checked": t} for i, (line, t) in enumerate(zip(lines, ticked), 1)]
-        return _answer(state, "visit", pre + say(lang, "visit_yes_no"), intro=intro, items=items, choices=choices,
-                       multi=True, clear={"label": say(lang, "none_ticked"), "message": SKIP_MESSAGE})
+    if _is_several(contact, step):
+        return _ask_several(state, contact, step, pre, intro)
     field = _visit_field(contact, step)
     label = field_label(field)
-    if field.kind == "entries":
-        picked = {e.get("category") for e in state.visit.values.get(field.field_key) or [] if isinstance(e, dict)}
-        lines = numbered([apartment_chat.option_label(o) for o in field.options])
-        ticked = [o.value in picked for o in field.options]
-        items = [line + (" " + say(lang, "done_mark") if t else "") for line, t in zip(lines, ticked)]
-        choices = [{"label": line, "message": str(i), "checked": t} for i, (line, t) in enumerate(zip(lines, ticked), 1)]
-        return _answer(state, "visit", pre + say(lang, "visit_entries", label=label), intro=intro, items=items,
-                       choices=choices, multi=True, clear={"label": say(lang, "none_ticked"), "message": SKIP_MESSAGE})
     if field.kind == "date":
         # The first question: no "done" button here (it would save a visit with nothing but a date).
         default = field.default if isinstance(field.default, str) else None
@@ -712,31 +699,26 @@ def _visit_turn(state: PersonState, contact: Contact, text: str) -> dict:
     if step is None:
         return _visit_confirm(state, contact)
     # No word cancels here ("no" may be a value): the page's Cancel button does.
-    if step == YES_NO_STEP:
-        boxes = [f for f in contact.visit_fields if f.kind == "yes_no"]
-        ticked = []
-        for part in text.replace("،", ",").split(","):
-            index = pick_index(part.strip(), len(boxes))
-            if index is None:
-                return _ask_visit(state, contact, prefix=say(lang, "pick_number"))
-            ticked.append(boxes[index].field_key)
-        for f in boxes:
-            if f.field_key in ticked:
-                visit.values[f.field_key] = True
-            else:
-                visit.values.pop(f.field_key, None)  # an unticked mitzva is simply left out
+    if _is_several(contact, step):
+        labels, ticked = _several(contact, step, visit)
+        if text == NEXT_MESSAGE:
+            visit.position += 1
+            return _ask_visit(state, contact)
+        parts = [p.strip() for p in text.replace("،", ",").split(",") if p.strip()]
+        indexes = [pick_index(p, len(labels)) for p in parts]
+        if not indexes or None in indexes:
+            return _ask_visit(state, contact, prefix=say(lang, "pick_number"))
+        if len(indexes) == 1:
+            # A tap on one item's button: tick it, or untick it; the same question comes back.
+            ticked[indexes[0]] = not ticked[indexes[0]]
+            _set_several(contact, step, visit, ticked)
+            return _ask_visit(state, contact)
+        # "1,3" typed (a text channel): exactly these, then the next question.
+        _set_several(contact, step, visit, [i in indexes for i in range(len(labels))])
         visit.position += 1
         return _ask_visit(state, contact)
     field = _visit_field(contact, step)
-    if field.kind == "entries":
-        picked = []
-        for part in text.replace("،", ",").split(","):
-            index = pick_index(part.strip(), len(field.options))
-            if index is None:
-                return _ask_visit(state, contact, prefix=say(lang, "pick_number"))
-            picked.append(field.options[index].value)
-        visit.values[field.field_key] = [{"category": value, "note": ""} for value in dict.fromkeys(picked)]
-    elif field.kind == "date":
+    if field.kind == "date":
         if text == DEFAULT_MESSAGE and isinstance(field.default, str):
             visit.values[field.field_key] = field.default
         else:
@@ -755,6 +737,55 @@ def _visit_turn(state: PersonState, contact: Contact, text: str) -> dict:
         visit.values[field.field_key] = text
     visit.position += 1
     return _ask_visit(state, contact)
+
+
+def _is_several(contact: Contact, step: str) -> bool:
+    """A pick-several question: every yes/no field together, or the interactions."""
+    if step == YES_NO_STEP:
+        return True
+    field = _visit_field(contact, step)
+    return field is not None and field.kind == "entries"
+
+
+def _several(contact: Contact, step: str, visit: VisitDraft) -> tuple[list[str], list[bool]]:
+    """(the items' labels, which are ticked) of a pick-several question."""
+    if step == YES_NO_STEP:
+        boxes = [f for f in contact.visit_fields if f.kind == "yes_no"]
+        return [field_label(f) for f in boxes], [visit.values.get(f.field_key) is True for f in boxes]
+    field = _visit_field(contact, step)
+    picked = {e.get("category") for e in visit.values.get(field.field_key) or [] if isinstance(e, dict)}
+    return [apartment_chat.option_label(o) for o in field.options], [o.value in picked for o in field.options]
+
+
+def _set_several(contact: Contact, step: str, visit: VisitDraft, ticked: list[bool]) -> None:
+    if step == YES_NO_STEP:
+        boxes = [f for f in contact.visit_fields if f.kind == "yes_no"]
+        for f, on in zip(boxes, ticked):
+            if on:
+                visit.values[f.field_key] = True
+            else:
+                visit.values.pop(f.field_key, None)  # an unticked mitzva is simply left out
+        return
+    field = _visit_field(contact, step)
+    visit.values[field.field_key] = [{"category": o.value, "note": ""} for o, on in zip(field.options, ticked) if on]
+
+
+def _ask_several(state: PersonState, contact: Contact, step: str, pre: str, intro: str) -> dict:
+    """Bot-style: every item is a button; a tap ticks or unticks it (the question comes back with
+    "✓" on the ticked ones), and "Continue" moves on ("None of these" while nothing is ticked).
+    The text lists the items numbered, so "1,3" can be typed on a text-only channel."""
+    lang = state.language
+    labels, ticked = _several(contact, step, state.visit)
+    mark = say(lang, "done_mark")
+    items = [f"{i}. {label}" + (f" {mark}" if on else "") for i, (label, on) in enumerate(zip(labels, ticked), 1)]
+    choices = [{"label": (f"{mark} " if on else "") + label, "message": str(i)}
+               for i, (label, on) in enumerate(zip(labels, ticked), 1)]
+    choices.append({"label": say(lang, "continue" if any(ticked) else "none_ticked"), "message": NEXT_MESSAGE})
+    if step == YES_NO_STEP:
+        question = say(lang, "visit_yes_no")
+    else:
+        question = say(lang, "visit_entries", label=field_label(_visit_field(contact, step)))
+    return _answer(state, "visit", pre + question, intro=intro, items=items, choices=choices)
 
 
 def _required(contact: Contact, step: str) -> bool:

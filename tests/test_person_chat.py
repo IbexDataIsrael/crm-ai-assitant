@@ -367,15 +367,24 @@ def test_a_full_visit_one_confirm_one_call(client, fake_crm):
     # The first question has no "done" button: a visit is never saved with nothing but a date by one tap.
     assert q["choices"] == [{"label": "Today (2026-11-02)", "message": "[default]"}]
     q = step(client, fake_crm, q["state"], "[default]")
-    # Then what was done: every yes/no field (the mitzvot) at once ...
-    assert q["multi"] is True and "What was done?" in q["reply"]
-    assert [c["label"] for c in q["choices"]] == ["1. Tefillin", "2. Shabbat candles", "3. Tzedaka"]
-    assert q["clear"] == {"label": "None of these", "message": "[skip]"}
-    q = step(client, fake_crm, q["state"], "1,2")
-    # ... and the interactions, from the CRM's own categories.
-    assert q["multi"] is True and q["prompt"].startswith("Interactions - what happened during the visit?")
-    assert [(c["label"], c["checked"]) for c in q["choices"]] == [("1. Call", False), ("2. Mezuza check", False)]
+    # Then what was done: every yes/no field (the mitzvot) as buttons - a bot, not a form.
+    assert q["multi"] is False and "What was done? Tap each one" in q["reply"]
+    assert [(c["label"], c["message"]) for c in q["choices"]] == [
+        ("Tefillin", "1"), ("Shabbat candles", "2"), ("Tzedaka", "3"), ("None of these", "[next]")]
+    q = step(client, fake_crm, q["state"], "1")  # a tap ticks and asks again
+    assert [c["label"] for c in q["choices"]] == ["✓ Tefillin", "Shabbat candles", "Tzedaka", "Continue"]
+    assert "1. Tefillin ✓" in q["reply"]
+    q = step(client, fake_crm, q["state"], "3")
     q = step(client, fake_crm, q["state"], "2")
+    q = step(client, fake_crm, q["state"], "3")  # a second tap unticks
+    assert [c["label"] for c in q["choices"]] == ["✓ Tefillin", "✓ Shabbat candles", "Tzedaka", "Continue"]
+    q = step(client, fake_crm, q["state"], "[next]")
+    # ... and the interactions, from the CRM's own categories, the same way.
+    assert q["prompt"].startswith("Interactions - what happened during the visit?")
+    assert [c["label"] for c in q["choices"]] == ["Call", "Mezuza check", "None of these"]
+    q = step(client, fake_crm, q["state"], "2")
+    assert [c["label"] for c in q["choices"]] == ["Call", "✓ Mezuza check", "Continue"]
+    q = step(client, fake_crm, q["state"], "[next]")
     assert q["prompt"].startswith("Visit type:") and [c["message"] for c in q["choices"]] == ["1", "2", "[skip]",
                                                                                                "[finish]"]
     assert q["choices"][-1]["label"] == "Done - review the visit"
@@ -541,3 +550,29 @@ def test_no_contact_or_visit_field_name_is_kept_in_the_assistant_code():
     for field in FIELDS + VISIT_FIELDS:
         assert f'"{field["field_key"]}"' not in code and f'"{field["label"]}"' not in code
     assert not re.search(r"dashboard/contacts", code)
+
+
+def test_typing_several_numbers_sets_exactly_those_and_moves_on(client, fake_crm):
+    """For a text-only channel (WhatsApp without buttons): "1,3" in one message."""
+    q = start_visit(client, fake_crm)
+    q = step(client, fake_crm, q["state"], "[default]")
+    q = step(client, fake_crm, q["state"], "1, 3")
+    assert q["prompt"].startswith("Interactions")
+    assert q["state"]["visit"]["values"] == {"visits.visit_date": "2026-11-02",
+                                             "customfield.visit.tefillin": True, "customfield.visit.tzedaka": True}
+
+
+def test_none_of_these_moves_on_with_nothing_ticked(client, fake_crm):
+    q = start_visit(client, fake_crm)
+    q = step(client, fake_crm, q["state"], "[default]")
+    q = step(client, fake_crm, q["state"], "[next]")
+    assert q["prompt"].startswith("Interactions") and "customfield.visit.tefillin" not in q["state"]["visit"]["values"]
+
+
+def test_no_visit_question_is_a_checkbox_form(client, fake_crm):
+    q = start_visit(client, fake_crm)
+    seen = [q]
+    for message in ("[default]", "1", "[next]", "1", "[next]", "1", "[skip]", "1", "x", "[skip]"):
+        q = step(client, fake_crm, q["state"], message)
+        seen.append(q)
+    assert all(a["multi"] is False and all("checked" not in c for c in a["choices"]) for a in seen)
